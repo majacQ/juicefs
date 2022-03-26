@@ -8,7 +8,7 @@
 	<version>0.17-dev</version>
 	<packaging>jar</packaging>
 	<properties>
-		<hadoop.version>3.0.0</hadoop.version>
+		<hadoop.version>3.3.0</hadoop.version>
 	</properties>
 	<build>
 		<plugins>
