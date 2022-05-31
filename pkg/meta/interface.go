@@ -1,27 +1,31 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package meta
 
 import (
+	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/juicedata/juicefs/pkg/version"
 )
 
@@ -51,6 +55,12 @@ const (
 )
 
 const (
+	RenameNoReplace = 1 << iota
+	RenameExchange
+	RenameWhiteout
+)
+
+const (
 	// SetAttrMode is a mask to update a attribute of node
 	SetAttrMode = 1 << iota
 	SetAttrUID
@@ -63,6 +73,19 @@ const (
 	SetAttrMtimeNow
 )
 
+const MaxName = 255
+const TrashInode = 0x7FFFFFFF10000000 // larger than vfs.minInternalNode
+const TrashName = ".trash"
+
+func isTrash(ino Ino) bool {
+	return ino >= TrashInode
+}
+
+type internalNode struct {
+	inode Ino
+	name  string
+}
+
 // MsgCallback is a callback for messages from meta service.
 type MsgCallback func(...interface{}) error
 
@@ -73,6 +96,7 @@ type Attr struct {
 	Mode      uint16 // permission mode
 	Uid       uint32 // owner id
 	Gid       uint32 // group id of owner
+	Rdev      uint32 // device number
 	Atime     int64  // last access time
 	Mtime     int64  // last modified time
 	Ctime     int64  // last change time for meta
@@ -81,9 +105,8 @@ type Attr struct {
 	Ctimensec uint32 // nanosecond part of ctime
 	Nlink     uint32 // number of links (sub-directories or hardlinks)
 	Length    uint64 // length of regular file
-	Rdev      uint32 // device number
 
-	Parent    Ino  // inode of parent, only for Directory
+	Parent    Ino  // inode of parent; 0 means tracked by parentKey (for hardlinks)
 	Full      bool // the attributes are completed or not
 	KeepCache bool // whether to keep the cached page or not
 }
@@ -183,7 +206,7 @@ type Summary struct {
 
 type SessionInfo struct {
 	Version    string
-	Hostname   string
+	HostName   string
 	MountPoint string
 	ProcessID  int
 }
@@ -202,8 +225,8 @@ type Plock struct {
 
 // Session contains detailed information of a client session
 type Session struct {
-	Sid       uint64
-	Heartbeat time.Time
+	Sid    uint64
+	Expire time.Time
 	SessionInfo
 	Sustained []Ino   `json:",omitempty"`
 	Flocks    []Flock `json:",omitempty"`
@@ -216,14 +239,22 @@ type Meta interface {
 	Name() string
 	// Init is used to initialize a meta service.
 	Init(format Format, force bool) error
+	// Shutdown close current database connections.
+	Shutdown() error
+	// Reset cleans up all metadata, VERY DANGEROUS!
+	Reset() error
 	// Load loads the existing setting of a formatted volume from meta service.
-	Load() (*Format, error)
+	Load(checkVersion bool) (*Format, error)
 	// NewSession creates a new client session.
 	NewSession() error
+	// CloseSession does cleanup and close the session.
+	CloseSession() error
 	// GetSession retrieves information of session with sid
-	GetSession(sid uint64) (*Session, error)
+	GetSession(sid uint64, detail bool) (*Session, error)
 	// ListSessions returns all client sessions.
 	ListSessions() ([]*Session, error)
+	// CleanStaleSessions cleans up sessions not active for more than 5 minutes
+	CleanStaleSessions()
 
 	// StatFS returns summary statistics of a volume.
 	StatFS(ctx Context, totalspace, availspace, iused, iavail *uint64) syscall.Errno
@@ -248,7 +279,7 @@ type Meta interface {
 	// Symlink creates a symlink in a directory with given name.
 	Symlink(ctx Context, parent Ino, name string, path string, inode *Ino, attr *Attr) syscall.Errno
 	// Mknod creates a node in a directory with given name, type and permissions.
-	Mknod(ctx Context, parent Ino, name string, _type uint8, mode uint16, cumask uint16, rdev uint32, inode *Ino, attr *Attr) syscall.Errno
+	Mknod(ctx Context, parent Ino, name string, _type uint8, mode uint16, cumask uint16, rdev uint32, path string, inode *Ino, attr *Attr) syscall.Errno
 	// Mkdir creates a sub-directory with given name and mode.
 	Mkdir(ctx Context, parent Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *Ino, attr *Attr) syscall.Errno
 	// Unlink removes a file entry from a directory.
@@ -259,7 +290,7 @@ type Meta interface {
 	// Rename move an entry from a source directory to another with given name.
 	// The targeted entry will be overwrited if it's a file or empty directory.
 	// For Hadoop, the target should not be overwritten.
-	Rename(ctx Context, parentSrc Ino, nameSrc string, parentDst Ino, nameDst string, inode *Ino, attr *Attr) syscall.Errno
+	Rename(ctx Context, parentSrc Ino, nameSrc string, parentDst Ino, nameDst string, flags uint32, inode *Ino, attr *Attr) syscall.Errno
 	// Link creates an entry for node.
 	Link(ctx Context, inodeSrc, parent Ino, name string, attr *Attr) syscall.Errno
 	// Readdir returns all entries for given directory, which include attributes if plus is true.
@@ -273,20 +304,22 @@ type Meta interface {
 	// Read returns the list of slices on the given chunk.
 	Read(ctx Context, inode Ino, indx uint32, chunks *[]Slice) syscall.Errno
 	// NewChunk returns a new id for new data.
-	NewChunk(ctx Context, inode Ino, indx uint32, offset uint32, chunkid *uint64) syscall.Errno
+	NewChunk(ctx Context, chunkid *uint64) syscall.Errno
 	// Write put a slice of data on top of the given chunk.
 	Write(ctx Context, inode Ino, indx uint32, off uint32, slice Slice) syscall.Errno
 	// InvalidateChunkCache invalidate chunk cache
 	InvalidateChunkCache(ctx Context, inode Ino, indx uint32) syscall.Errno
 	// CopyFileRange copies part of a file to another one.
 	CopyFileRange(ctx Context, fin Ino, offIn uint64, fout Ino, offOut uint64, size uint64, flags uint32, copied *uint64) syscall.Errno
+	// GetParents returns a map of node parents (> 1 parents if hardlinked)
+	GetParents(ctx Context, inode Ino) map[Ino]int
 
 	// GetXattr returns the value of extended attribute for given name.
 	GetXattr(ctx Context, inode Ino, name string, vbuff *[]byte) syscall.Errno
 	// ListXattr returns all extended attributes of a node.
 	ListXattr(ctx Context, inode Ino, dbuff *[]byte) syscall.Errno
 	// SetXattr update the extended attribute of a node.
-	SetXattr(ctx Context, inode Ino, name string, value []byte) syscall.Errno
+	SetXattr(ctx Context, inode Ino, name string, value []byte, flags uint32) syscall.Errno
 	// RemoveXattr removes the extended attribute of a node.
 	RemoveXattr(ctx Context, inode Ino, name string) syscall.Errno
 	// Flock tries to put a lock on given file.
@@ -297,28 +330,16 @@ type Meta interface {
 	Setlk(ctx Context, inode Ino, owner uint64, block bool, ltype uint32, start, end uint64, pid uint32) syscall.Errno
 
 	// Compact all the chunks by merge small slices together
-	CompactAll(ctx Context) syscall.Errno
+	CompactAll(ctx Context, bar *utils.Bar) syscall.Errno
 	// ListSlices returns all slices used by all files.
-	ListSlices(ctx Context, slices *[]Slice, delete bool, showProgress func()) syscall.Errno
+	ListSlices(ctx Context, slices map[Ino][]Slice, delete bool, showProgress func()) syscall.Errno
 
 	// OnMsg add a callback for the given message type.
 	OnMsg(mtype uint32, cb MsgCallback)
 
-	DumpMeta(w io.Writer) error
+	// Dump the tree under root, which may be modified by checkRoot
+	DumpMeta(w io.Writer, root Ino) error
 	LoadMeta(r io.Reader) error
-}
-
-func removePassword(uri string) string {
-	p := strings.Index(uri, "@")
-	if p < 0 {
-		return uri
-	}
-	sp := strings.Index(uri, "://")
-	cp := strings.Index(uri[sp+3:], ":")
-	if cp < 0 || sp+3+cp > p {
-		return uri
-	}
-	return uri[:sp+3+cp] + uri[p:]
 }
 
 type Creator func(driver, addr string, conf *Config) (Meta, error)
@@ -329,42 +350,96 @@ func Register(name string, register Creator) {
 	metaDrivers[name] = register
 }
 
+func setPasswordFromEnv(uri string) (string, error) {
+	atIndex := strings.Index(uri, "@")
+	if atIndex == -1 {
+		return "", fmt.Errorf("invalid uri: %s", uri)
+	}
+	dIndex := strings.Index(uri, "://") + 3
+	s := strings.Split(uri[dIndex:atIndex], ":")
+
+	if len(s) > 2 || s[0] == "" {
+		return "", fmt.Errorf("invalid uri: %s", uri)
+	}
+
+	if len(s) == 2 && s[1] != "" {
+		return uri, nil
+	}
+	pwd := url.UserPassword("", os.Getenv("META_PASSWORD")) // escape only password
+	return uri[:dIndex] + s[0] + pwd.String() + uri[atIndex:], nil
+}
+
 // NewClient creates a Meta client for given uri.
 func NewClient(uri string, conf *Config) Meta {
+	var err error
 	if !strings.Contains(uri, "://") {
 		uri = "redis://" + uri
-	}
-	logger.Infof("Meta address: %s", removePassword(uri))
-	if os.Getenv("META_PASSWORD") != "" {
-		p := strings.Index(uri, ":@")
-		if p > 0 {
-			uri = uri[:p+1] + os.Getenv("META_PASSWORD") + uri[p+1:]
-		}
 	}
 	p := strings.Index(uri, "://")
 	if p < 0 {
 		logger.Fatalf("invalid uri: %s", uri)
 	}
 	driver := uri[:p]
+	if os.Getenv("META_PASSWORD") != "" && (driver == "mysql" || driver == "postgres") {
+		if uri, err = setPasswordFromEnv(uri); err != nil {
+			logger.Fatalf(err.Error())
+		}
+	}
+	logger.Infof("Meta address: %s", utils.RemovePassword(uri))
 	f, ok := metaDrivers[driver]
 	if !ok {
 		logger.Fatalf("Invalid meta driver: %s", driver)
 	}
 	m, err := f(driver, uri[p+3:], conf)
 	if err != nil {
-		logger.Fatalf("Meta is not available: %s", err)
+		logger.Fatalf("Meta %s is not available: %s", uri, err)
 	}
 	return m
 }
 
-func newSessionInfo() (*SessionInfo, error) {
+func newSessionInfo() *SessionInfo {
 	host, err := os.Hostname()
 	if err != nil {
-		return nil, err
+		logger.Warnf("Failed to get hostname: %s", err)
+		host = ""
 	}
-	return &SessionInfo{Version: version.Version(), Hostname: host, ProcessID: os.Getpid()}, nil
+	return &SessionInfo{Version: version.Version(), HostName: host, ProcessID: os.Getpid()}
 }
 
 func timeit(start time.Time) {
 	opDist.Observe(time.Since(start).Seconds())
+}
+
+// Get full path of an inode; a random one is picked if it has multiple hard links
+func GetPath(m Meta, ctx Context, inode Ino) (string, syscall.Errno) {
+	var names []string
+	var attr Attr
+	for inode != 1 {
+		if st := m.GetAttr(ctx, inode, &attr); st != 0 {
+			logger.Debugf("getattr inode %d: %s", inode, st)
+			return "", st
+		}
+
+		var entries []*Entry
+		if st := m.Readdir(ctx, attr.Parent, 0, &entries); st != 0 {
+			return "", st
+		}
+		var name string
+		for _, e := range entries {
+			if e.Inode == inode {
+				name = string(e.Name)
+				break
+			}
+		}
+		if name == "" {
+			return "", syscall.ENOENT
+		}
+		names = append(names, name)
+		inode = attr.Parent
+	}
+
+	for i, j := 0, len(names)-1; i < j; i, j = i+1, j-1 { // reverse
+		names[i], names[j] = names[j], names[i]
+	}
+	return "/" + strings.Join(names, "/"), 0
 }

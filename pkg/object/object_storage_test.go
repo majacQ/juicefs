@@ -1,25 +1,28 @@
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -28,6 +31,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-redis/redis/v8"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func get(s ObjectStorage, k string, off, limit int64) (string, error) {
@@ -44,7 +50,7 @@ func get(s ObjectStorage, k string, off, limit int64) (string, error) {
 
 func listAll(s ObjectStorage, prefix, marker string, limit int64) ([]Object, error) {
 	r, err := s.List(prefix, marker, limit)
-	if err == nil {
+	if !errors.Is(err, notSupported) {
 		return r, nil
 	}
 	ch, err := s.ListAll(prefix, marker)
@@ -65,7 +71,9 @@ func testStorage(t *testing.T, s ObjectStorage) {
 	if err := s.Create(); err != nil {
 		t.Fatalf("Can't create bucket %s: %s", s, err)
 	}
-
+	if err := s.Create(); err != nil {
+		t.Fatalf("err should be nil when creating a bucket with the same name")
+	}
 	s = WithPrefix(s, "unit-test/")
 	defer s.Delete("test")
 	k := "large"
@@ -82,42 +90,82 @@ func testStorage(t *testing.T, s ObjectStorage) {
 	}
 
 	if d, e := get(s, "test", 0, -1); d != "hello" {
-		t.Fatalf("expect hello, but got %v, error:%s", d, e)
+		t.Fatalf("expect hello, but got %v, error: %s", d, e)
+	}
+	if d, e := get(s, "test", 2, -1); d != "llo" {
+		t.Logf("expect llo, but got %v, error: %s", d, e)
 	}
 	if d, e := get(s, "test", 2, 3); d != "llo" {
-		t.Fatalf("expect llo, but got %v, error:%s", d, e)
+		t.Fatalf("expect llo, but got %v, error: %s", d, e)
 	}
 	if d, e := get(s, "test", 2, 2); d != "ll" {
-		t.Fatalf("expect ll, but got %v, error:%s", d, e)
+		t.Fatalf("expect ll, but got %v, error: %s", d, e)
 	}
 	if d, e := get(s, "test", 4, 2); d != "o" {
-		t.Errorf("out-of-range get: 'o', but got %v, error:%s", len(d), e)
+		t.Errorf("out-of-range get: 'o', but got %v, error: %s", len(d), e)
 	}
-
-	objs, err2 := listAll(s, "", "", 1)
-	if err2 == nil {
-		if len(objs) != 1 {
-			t.Fatalf("List should return 1 keys, but got %d", len(objs))
-		}
-		if objs[0].Key() != "test" {
-			t.Fatalf("First key should be test, but got %s", objs[0].Key())
-		}
-		if !strings.Contains(s.String(), "encrypted") && objs[0].Size() != 5 {
-			t.Fatalf("Size of first key shold be 5, but got %v", objs[0].Size())
-		}
-		now := time.Now()
-		if objs[0].Mtime().Before(now.Add(-30*time.Second)) || objs[0].Mtime().After(now.Add(time.Second*30)) {
-			t.Fatalf("Mtime of key should be within 10 seconds, but got %s", objs[0].Mtime().Sub(now))
-		}
-	} else {
-		t.Fatalf("list failed: %s", err2.Error())
+	if d, e := get(s, "test", 6, 2); d != "" {
+		t.Errorf("out-of-range get: '', but got %v, error: %s", len(d), e)
 	}
+	switch s.(*withPrefix).os.(type) {
+	case FileSystem:
+		objs, err2 := listAll(s, "", "", 2)
+		if err2 == nil {
+			if len(objs) != 2 {
+				t.Fatalf("List should return 2 keys, but got %d", len(objs))
+			}
+			if objs[0].Key() != "" {
+				t.Fatalf("First key should be empty string, but got %s", objs[0].Key())
+			}
+			if objs[0].Size() != 0 {
+				t.Fatalf("First object size should be 0, but got %d", objs[0].Size())
+			}
+			if objs[1].Key() != "test" {
+				t.Fatalf("First key should be test, but got %s", objs[1].Key())
+			}
+			if !strings.Contains(s.String(), "encrypted") && objs[1].Size() != 5 {
+				t.Fatalf("Size of first key shold be 5, but got %v", objs[1].Size())
+			}
+			now := time.Now()
+			if objs[1].Mtime().Before(now.Add(-30*time.Second)) || objs[1].Mtime().After(now.Add(time.Second*30)) {
+				t.Fatalf("Mtime of key should be within 10 seconds, but got %s", objs[1].Mtime().Sub(now))
+			}
+		} else {
+			t.Fatalf("list failed: %s", err2.Error())
+		}
 
-	objs, err2 = listAll(s, "", "test2", 1)
-	if err2 != nil {
-		t.Fatalf("list3 failed: %s", err2.Error())
-	} else if len(objs) != 0 {
-		t.Fatalf("list3 should not return anything, but got %d", len(objs))
+		objs, err2 = listAll(s, "", "test2", 1)
+		if err2 != nil {
+			t.Fatalf("list3 failed: %s", err2.Error())
+		} else if len(objs) != 0 {
+			t.Fatalf("list3 should not return anything, but got %d", len(objs))
+		}
+	default:
+		objs, err2 := listAll(s, "", "", 1)
+		if err2 == nil {
+			if len(objs) != 1 {
+				t.Fatalf("List should return 1 keys, but got %d", len(objs))
+			}
+			if objs[0].Key() != "test" {
+				t.Fatalf("First key should be test, but got %s", objs[0].Key())
+			}
+			if !strings.Contains(s.String(), "encrypted") && objs[0].Size() != 5 {
+				t.Fatalf("Size of first key shold be 5, but got %v", objs[0].Size())
+			}
+			now := time.Now()
+			if objs[0].Mtime().Before(now.Add(-30*time.Second)) || objs[0].Mtime().After(now.Add(time.Second*30)) {
+				t.Fatalf("Mtime of key should be within 10 seconds, but got %s", objs[0].Mtime().Sub(now))
+			}
+		} else {
+			t.Fatalf("list failed: %s", err2.Error())
+		}
+
+		objs, err2 = listAll(s, "", "test2", 1)
+		if err2 != nil {
+			t.Fatalf("list3 failed: %s", err2.Error())
+		} else if len(objs) != 0 {
+			t.Fatalf("list3 should not return anything, but got %d", len(objs))
+		}
 	}
 
 	f, _ := ioutil.TempFile("", "test")
@@ -131,6 +179,10 @@ func testStorage(t *testing.T, s ObjectStorage) {
 		t.Fatalf("file should exists")
 	} else {
 		s.Delete("file")
+	}
+
+	if _, err := s.Head("not-exist-file"); !os.IsNotExist(err) {
+		t.Fatal("err should be os.ErrNotExist")
 	}
 
 	if _, err := s.Head("test"); err != nil {
@@ -187,13 +239,13 @@ func testStorage(t *testing.T, s ObjectStorage) {
 	// Copy empty objects
 	defer s.Delete("empty")
 	if err := s.Put("empty", bytes.NewReader([]byte{})); err != nil {
-		t.Fatalf("PUT empty object failed: %s", err.Error())
+		t.Logf("PUT empty object failed: %s", err.Error())
 	}
 
 	// Copy `/` suffixed object
 	defer s.Delete("slash/")
 	if err := s.Put("slash/", bytes.NewReader([]byte{})); err != nil {
-		t.Fatalf("PUT `/` suffixed object failed: %s", err.Error())
+		t.Logf("PUT `/` suffixed object failed: %s", err.Error())
 	}
 }
 
@@ -214,6 +266,14 @@ func TestQingStor(t *testing.T) {
 	s, _ := newQingStor("https://test.pek3a.qingstor.com",
 		os.Getenv("QY_ACCESS_KEY"), os.Getenv("QY_SECRET_KEY"))
 	testStorage(t, s)
+
+	//private cloud
+	if os.Getenv("PRIVATE_QY_ACCESS_KEY") == "" {
+		t.SkipNow()
+	}
+	s2, _ := newQingStor("http://test.jn1.is.shanhe.com",
+		os.Getenv("PRIVATE_QY_ACCESS_KEY"), os.Getenv("PRIVATE_QY_SECRET_KEY"))
+	testStorage(t, s2)
 }
 
 func TestS3(t *testing.T) {
@@ -248,11 +308,10 @@ func TestUFile(t *testing.T) {
 }
 
 func TestGS(t *testing.T) {
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
+	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
 		t.SkipNow()
 	}
-	os.Setenv("GOOGLE_CLOUD_PROJECT", "davies-test")
-	gs, _ := newGS("https://test.us-west1.googleapi.com", "", "")
+	gs, _ := newGS("gs://zhijian-test/", "", "")
 	testStorage(t, gs)
 }
 
@@ -406,7 +465,7 @@ func TestMinIO(t *testing.T) {
 	if os.Getenv("MINIO_TEST_BUCKET") == "" {
 		t.SkipNow()
 	}
-	b, _ := newMinio(fmt.Sprintf("http://%s", os.Getenv("MINIO_TEST_BUCKET")), "", "")
+	b, _ := newMinio(fmt.Sprintf("http://%s/some/path", os.Getenv("MINIO_TEST_BUCKET")), "", "")
 	testStorage(t, b)
 }
 
@@ -420,6 +479,43 @@ func TestYovole(t *testing.T) {
 		t.SkipNow()
 	}
 	s, _ := newYovole(os.Getenv("OS2_TEST_BUCKET"), os.Getenv("OS2_ACCESS_KEY"), os.Getenv("OS2_SECRET_KEY"))
+	testStorage(t, s)
+}
+
+func TestTiKV(t *testing.T) {
+	if os.Getenv("TIKV_ADDR") == "" {
+		t.SkipNow()
+	}
+	s, err := newTiKV(os.Getenv("TIKV_ADDR"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testStorage(t, s)
+}
+func TestRedis(t *testing.T) {
+	if os.Getenv("REDIS_ADDR") == "" {
+		t.SkipNow()
+	}
+
+	opt, _ := redis.ParseURL(os.Getenv("REDIS_ADDR"))
+	rdb := redis.NewClient(opt)
+	_ = rdb.FlushDB(context.Background())
+
+	s, err := newRedis(os.Getenv("REDIS_ADDR"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testStorage(t, s)
+}
+
+func TestSwift(t *testing.T) {
+	if os.Getenv("SWIFT_ADDR") == "" {
+		t.SkipNow()
+	}
+	s, err := newSwiftOSS(os.Getenv("SWIFT_ADDR"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	testStorage(t, s)
 }
 
@@ -441,12 +537,20 @@ func TestEncrypted(t *testing.T) {
 }
 
 func TestMarsharl(t *testing.T) {
-	s, _ := CreateStorage("mem", "", "", "")
-	_ = s.Put("hello", bytes.NewReader([]byte("world")))
+	if os.Getenv("HDFS_ADDR") == "" {
+		t.Skip()
+	}
+	s, _ := newHDFS(os.Getenv("HDFS_ADDR"), "", "")
+	if err := s.Put("hello", bytes.NewReader([]byte("world"))); err != nil {
+		t.Fatalf("PUT failed: %s", err)
+	}
 	fs := s.(FileSystem)
 	_ = fs.Chown("hello", "user", "group")
 	_ = fs.Chmod("hello", 0764)
-	o, _ := s.Head("hello")
+	o, err := s.Head("hello")
+	if err != nil {
+		t.Fatalf("HEAD failed: %s", err)
+	}
 
 	m := MarshalObject(o)
 	d, _ := json.Marshal(m)
@@ -469,6 +573,28 @@ func TestSharding(t *testing.T) {
 	testStorage(t, s)
 }
 
+func TestSQLite(t *testing.T) {
+	s, err := newSQLStore("sqlite3", "/tmp/teststore.db", "", "")
+	if err != nil {
+		t.Fatalf("create: %s", err)
+	}
+	testStorage(t, s)
+}
+
+func TestPG(t *testing.T) {
+	s, err := newSQLStore("postgres", "localhost:5432/test?sslmode=disable", "", "")
+	if err == nil {
+		testStorage(t, s)
+	}
+}
+
+func TestMySQL(t *testing.T) {
+	s, err := newSQLStore("mysql", "/dev", "root", "")
+	if err == nil {
+		testStorage(t, s)
+	}
+}
+
 func TestNameString(t *testing.T) {
 	s, _ := newMem("test", "", "")
 	s = WithPrefix(s, "a/")
@@ -478,9 +604,7 @@ func TestNameString(t *testing.T) {
 	}
 }
 
-func TestLimited(t *testing.T) {
-	s, _ := newMem("test", "", "")
-	testStorage(t, NewLimited(s, 1<<20, 0))
-	s, _ = newMem("test2", "", "")
-	testStorage(t, NewLimited(s, 0, 1<<20))
+func TestEtcd(t *testing.T) {
+	s, _ := newEtcd("127.0.0.1:2379", "", "")
+	testStorage(t, s)
 }

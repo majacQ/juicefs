@@ -5,21 +5,19 @@
 	<name>juicefs-hadoop</name>
 	<description>Hadoop FileSystem implementation for JuiceFS</description>
 	<artifactId>juicefs-hadoop</artifactId>
-	<version>0.17-dev</version>
+	<version>1.0-dev</version>
 	<packaging>jar</packaging>
 	<properties>
-		<hadoop.version>3.0.0</hadoop.version>
+		<hadoop.version>3.1.4</hadoop.version>
+		<argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true -Djava.library.path=${project.basedir}/../mount/libjfs:${java.library.path} -Djdk.attach.allowAttachSelf=true</argLine>
 	</properties>
 	<build>
 		<plugins>
 			<plugin>
-				<artifactId>maven-compiler-plugin</artifactId>
-			</plugin>
-			<plugin>
 				<artifactId>maven-surefire-plugin</artifactId>
 				<version>2.19.1</version>
 				<configuration>
-					<argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true -Djava.library.path=${project.basedir}/../mount/libjfs:${java.library.path}</argLine>
+					<argLine>${argLine}</argLine>
 					<trimStackTrace>false</trimStackTrace>
 				</configuration>
 			</plugin>
@@ -39,11 +37,19 @@
 					<relocations>
 						<relocation>
 							<pattern>org.objectweb.asm</pattern>
-							<shadedPattern>juice.org.objectweb.asm</shadedPattern>
+							<shadedPattern>io.juicefs.shaded.org.objectweb.asm</shadedPattern>
 						</relocation>
 						<relocation>
 							<pattern>com.beust</pattern>
-							<shadedPattern>juice.com.beust</shadedPattern>
+							<shadedPattern>io.juicefs.shaded.com.beust</shadedPattern>
+						</relocation>
+						<relocation>
+							<pattern>org.json</pattern>
+							<shadedPattern>io.juicefs.shaded.org.json</shadedPattern>
+						</relocation>
+						<relocation>
+							<pattern>org.javassist</pattern>
+							<shadedPattern>io.juicefs.shaded.org.javassist</shadedPattern>
 						</relocation>
 					</relocations>
 				</configuration>
@@ -67,6 +73,25 @@
 						</manifest>
 					</archive>
 				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.jacoco</groupId>
+				<artifactId>jacoco-maven-plugin</artifactId>
+				<version>0.8.7</version>
+				<executions>
+					<execution>
+						<goals>
+							<goal>prepare-agent</goal>
+						</goals>
+					</execution>
+					<execution>
+						<id>report</id>
+						<phase>test</phase>
+						<goals>
+							<goal>report</goal>
+						</goals>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 		<resources>
@@ -120,17 +145,6 @@
 			<version>20180813</version>
 		</dependency>
 		<dependency>
-			<groupId>org.xeustechnologies</groupId>
-			<artifactId>jcl-core</artifactId>
-			<version>2.8</version>
-			<exclusions>
-				<exclusion>
-					<artifactId>slf4j-api</artifactId>
-					<groupId>org.slf4j</groupId>
-				</exclusion>
-			</exclusions>
-		</dependency>
-		<dependency>
 			<groupId>org.javassist</groupId>
 			<artifactId>javassist</artifactId>
 			<version>3.25.0-GA</version>
@@ -177,6 +191,18 @@
 			<artifactId>flink-streaming-java_2.12</artifactId>
 			<version>1.10.0</version>
 			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.kitesdk</groupId>
+			<artifactId>kite-data-core</artifactId>
+			<version>1.1.0</version>
+			<scope>provided</scope>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 	</dependencies>
 </project>

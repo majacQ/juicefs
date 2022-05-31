@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package vfs
@@ -90,16 +91,16 @@ func (r *frange) include(a *frange) bool { return r.off <= a.off && a.end() <= r
 // protected by file
 type sliceReader struct {
 	file       *fileReader
-	indx       uint32
 	block      *frange
 	state      sstate
 	page       *chunk.Page
+	indx       uint32
 	currentPos uint32
 	lastAccess time.Time
-	refs       uint16
 	cond       *utils.Cond
 	next       *sliceReader
 	prev       **sliceReader
+	refs       uint16
 }
 
 func (s *sliceReader) delay(delay time.Duration) {
@@ -181,7 +182,7 @@ func (s *sliceReader) run() {
 	} else if err != 0 {
 		f.tried++
 		trycnt := f.tried
-		if trycnt >= f.r.maxRetries {
+		if trycnt > f.r.maxRetries {
 			s.done(syscall.EIO, 0)
 		} else {
 			s.done(0, retry_time(trycnt))
@@ -220,7 +221,7 @@ func (s *sliceReader) run() {
 		err = syscall.EIO
 		f.tried++
 		_ = f.r.m.InvalidateChunkCache(meta.Background, inode, indx)
-		if f.tried >= f.r.maxRetries {
+		if f.tried > f.r.maxRetries {
 			s.done(err, 0)
 		} else {
 			s.done(0, retry_time(f.tried))
@@ -817,7 +818,7 @@ func (r *dataReader) Read(ctx context.Context, page *chunk.Page, chunks []meta.S
 	size := len(buf)
 	for i := 0; i < len(chunks); i++ {
 		if read < size && offset < pos+chunks[i].Len {
-			toread := utils.Min(int(size-read), int(pos+chunks[i].Len-offset))
+			toread := utils.Min(size-read, int(pos+chunks[i].Len-offset))
 			go func(s *meta.Slice, p *chunk.Page, off, pos uint32) {
 				defer p.Release()
 				errs <- r.readSlice(ctx, s, p, int(off))
@@ -859,7 +860,7 @@ func (r *dataReader) readManyChunks(ctx context.Context, page *chunk.Page, chunk
 CHUNKS:
 	for i := 0; i < len(chunks); i++ {
 		if read < size && offset < pos+chunks[i].Len {
-			toread := utils.Min(int(size-read), int(pos+chunks[i].Len-offset))
+			toread := utils.Min(size-read, int(pos+chunks[i].Len-offset))
 		WAIT:
 			for {
 				select {

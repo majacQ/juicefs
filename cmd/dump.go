@@ -1,22 +1,22 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
-	"fmt"
 	"io"
 	"os"
 
@@ -24,11 +24,36 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-func dump(ctx *cli.Context) error {
-	setLoggerLevel(ctx)
-	if ctx.Args().Len() < 1 {
-		return fmt.Errorf("META-URL is needed")
+func cmdDump() *cli.Command {
+	return &cli.Command{
+		Name:      "dump",
+		Action:    dump,
+		Category:  "ADMIN",
+		Usage:     "Dump metadata into a JSON file",
+		ArgsUsage: "META-URL [FILE]",
+		Description: `
+Dump metadata of the volume in JSON format so users are able to see its content in an easy way.
+Output of this command can be loaded later into an empty database, serving as a method to backup
+metadata or to change metadata engine.
+
+Examples:
+$ juicefs dump redis://localhost meta-dump
+
+# Dump only a subtree of the volume
+$ juicefs dump redis://localhost sub-meta-dump --subdir /dir/in/jfs
+
+Details: https://juicefs.com/docs/community/metadata_dump_load`,
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:  "subdir",
+				Usage: "only dump a sub-directory",
+			},
+		},
 	}
+}
+
+func dump(ctx *cli.Context) error {
+	setup(ctx, 1)
 	var fp io.WriteCloser
 	if ctx.Args().Len() == 1 {
 		fp = os.Stdout
@@ -40,25 +65,14 @@ func dump(ctx *cli.Context) error {
 		}
 		defer fp.Close()
 	}
+	removePassword(ctx.Args().Get(0))
 	m := meta.NewClient(ctx.Args().Get(0), &meta.Config{Retries: 10, Strict: true, Subdir: ctx.String("subdir")})
-	if err := m.DumpMeta(fp); err != nil {
+	if _, err := m.Load(true); err != nil {
+		return err
+	}
+	if err := m.DumpMeta(fp, 1); err != nil {
 		return err
 	}
 	logger.Infof("Dump metadata into %s succeed", ctx.Args().Get(1))
 	return nil
-}
-
-func dumpFlags() *cli.Command {
-	return &cli.Command{
-		Name:      "dump",
-		Usage:     "dump metadata into a JSON file",
-		ArgsUsage: "META-URL [FILE]",
-		Action:    dump,
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:  "subdir",
-				Usage: "only dump a sub-directory.",
-			},
-		},
-	}
 }

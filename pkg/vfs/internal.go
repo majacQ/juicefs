@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package vfs
@@ -31,11 +32,12 @@ import (
 )
 
 const (
-	minInternalNode = 0x7FFFFFFFFFFFF0
+	minInternalNode = 0x7FFFFFFF00000000
 	logInode        = minInternalNode + 1
 	controlInode    = minInternalNode + 2
 	statsInode      = minInternalNode + 3
 	configInode     = minInternalNode + 4
+	trashInode      = meta.TrashInode
 )
 
 type internalNode struct {
@@ -45,10 +47,11 @@ type internalNode struct {
 }
 
 var internalNodes = []*internalNode{
-	{logInode, ".accesslog", &Attr{Mode: 0400}},
 	{controlInode, ".control", &Attr{Mode: 0666}},
+	{logInode, ".accesslog", &Attr{Mode: 0400}},
 	{statsInode, ".stats", &Attr{Mode: 0444}},
 	{configInode, ".config", &Attr{Mode: 0400}},
+	{trashInode, meta.TrashName, &Attr{Mode: 0555}},
 }
 
 func init() {
@@ -56,13 +59,18 @@ func init() {
 	gid := uint32(os.Getgid())
 	now := time.Now().Unix()
 	for _, v := range internalNodes {
-		v.attr.Typ = meta.TypeFile
-		v.attr.Uid = uid
-		v.attr.Gid = gid
+		if v.inode == trashInode {
+			v.attr.Typ = meta.TypeDirectory
+			v.attr.Nlink = 2
+		} else {
+			v.attr.Typ = meta.TypeFile
+			v.attr.Nlink = 1
+			v.attr.Uid = uid
+			v.attr.Gid = gid
+		}
 		v.attr.Atime = now
 		v.attr.Mtime = now
 		v.attr.Ctime = now
-		v.attr.Nlink = 1
 		v.attr.Full = true
 	}
 }
@@ -112,8 +120,11 @@ func getInternalNodeByName(name string) *internalNode {
 	return nil
 }
 
-func collectMetrics() []byte {
-	mfs, err := prometheus.DefaultGatherer.Gather()
+func collectMetrics(registry *prometheus.Registry) []byte {
+	if registry == nil {
+		return []byte("")
+	}
+	mfs, err := registry.Gather()
 	if err != nil {
 		logger.Errorf("collect metrics: %s", err)
 		return nil
@@ -145,19 +156,23 @@ func collectMetrics() []byte {
 	return w.Bytes()
 }
 
-func handleInternalMsg(ctx Context, cmd uint32, r *utils.Buffer) []byte {
+func (v *VFS) handleInternalMsg(ctx Context, cmd uint32, r *utils.Buffer) []byte {
 	switch cmd {
 	case meta.Rmr:
 		inode := Ino(r.Get64())
 		name := string(r.Get(int(r.Get8())))
-		r := meta.Remove(m, ctx, inode, name)
+		r := meta.Remove(v.Meta, ctx, inode, name)
 		return []byte{uint8(r)}
 	case meta.Info:
 		var summary meta.Summary
 		inode := Ino(r.Get64())
+		var recursive uint8 = 1
+		if r.HasMore() {
+			recursive = r.Get8()
+		}
 
 		wb := utils.NewBuffer(4)
-		r := meta.GetSummary(m, ctx, inode, &summary)
+		r := meta.GetSummary(v.Meta, ctx, inode, &summary, recursive != 0)
 		if r != 0 {
 			msg := r.Error()
 			wb.Put32(uint32(len(msg)))
@@ -174,7 +189,7 @@ func handleInternalMsg(ctx Context, cmd uint32, r *utils.Buffer) []byte {
 			fmt.Fprintf(w, " chunks:\n")
 			for indx := uint64(0); indx*meta.ChunkSize < summary.Length; indx++ {
 				var cs []meta.Slice
-				_ = m.Read(ctx, inode, uint32(indx), &cs)
+				_ = v.Meta.Read(ctx, inode, uint32(indx), &cs)
 				for _, c := range cs {
 					fmt.Fprintf(w, "\t%d:\t%d\t%d\t%d\t%d\n", indx, c.Chunkid, c.Size, c.Off, c.Len)
 				}
@@ -187,9 +202,9 @@ func handleInternalMsg(ctx Context, cmd uint32, r *utils.Buffer) []byte {
 		concurrent := r.Get16()
 		background := r.Get8()
 		if background == 0 {
-			fillCache(paths, int(concurrent))
+			v.fillCache(paths, int(concurrent))
 		} else {
-			go fillCache(paths, int(concurrent))
+			go v.fillCache(paths, int(concurrent))
 		}
 		return []byte{uint8(0)}
 	default:

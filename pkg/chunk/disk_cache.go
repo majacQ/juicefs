@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package chunk
@@ -60,10 +61,11 @@ type cacheStore struct {
 	used     int64
 	keys     map[string]cacheItem
 	scanned  bool
-	uploader func(key, path string)
+	full     bool
+	uploader func(key, path string, force bool) bool
 }
 
-func newCacheStore(dir string, cacheSize int64, pendingPages int, config *Config, uploader func(key, path string)) *cacheStore {
+func newCacheStore(dir string, cacheSize int64, pendingPages int, config *Config, uploader func(key, path string, force bool) bool) *cacheStore {
 	if config.CacheMode == 0 {
 		config.CacheMode = 0600 // only owner can read/write cache
 	}
@@ -106,13 +108,14 @@ func (cache *cacheStore) stats() (int64, int64) {
 func (cache *cacheStore) checkFreeSpace() {
 	for {
 		br, fr := cache.curFreeRatio()
+		cache.full = br < cache.freeRatio/2 || fr < cache.freeRatio/2
 		if br < cache.freeRatio || fr < cache.freeRatio {
 			logger.Tracef("Cleanup cache when check free space (%s): free ratio (%d%%), space usage (%d%%), inodes usage (%d%%)", cache.dir, int(cache.freeRatio*100), int(br*100), int(fr*100))
 			cache.Lock()
 			cache.cleanup()
 			cache.Unlock()
 
-			br, fr := cache.curFreeRatio()
+			br, fr = cache.curFreeRatio()
 			if br < cache.freeRatio || fr < cache.freeRatio {
 				cache.uploadStaging()
 			}
@@ -163,7 +166,7 @@ func (cache *cacheStore) curFreeRatio() (float32, float32) {
 	return float32(free) / float32(total), float32(ffree) / float32(files)
 }
 
-func (cache *cacheStore) flushPage(path string, data []byte, sync bool) error {
+func (cache *cacheStore) flushPage(path string, data []byte) (err error) {
 	start := time.Now()
 	cacheWrites.Add(1)
 	cacheWriteBytes.Add(float64(len(data)))
@@ -174,37 +177,28 @@ func (cache *cacheStore) flushPage(path string, data []byte, sync bool) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE, cache.mode)
 	if err != nil {
-		logger.Infof("Can't create cache file %s: %s", tmp, err)
+		logger.Warnf("Can't create cache file %s: %s", tmp, err)
 		return err
 	}
-	_, err = f.Write(data)
-	if err != nil {
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	if _, err = f.Write(data); err != nil {
 		logger.Warnf("Write to cache file %s failed: %s", tmp, err)
 		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
+		return
 	}
-	if sync {
-		err = f.Sync()
-		if err != nil {
-			logger.Warnf("sync stagging file %s failed: %s", tmp, err)
-			_ = f.Close()
-			_ = os.Remove(tmp)
-			return err
-		}
-	}
-	err = f.Close()
-	if err != nil {
+	if err = f.Close(); err != nil {
 		logger.Warnf("Close cache file %s failed: %s", tmp, err)
-		_ = os.Remove(tmp)
-		return err
+		return
 	}
-	err = os.Rename(tmp, path)
-	if err != nil {
-		logger.Infof("Rename cache file %s -> %s failed: %s", tmp, path, err)
-		_ = os.Remove(tmp)
+	if err = os.Rename(tmp, path); err != nil {
+		logger.Warnf("Rename cache file %s -> %s failed: %s", tmp, path, err)
 	}
-	return err
+	return
 }
 
 func (cache *cacheStore) createDir(dir string) {
@@ -235,7 +229,14 @@ func (cache *cacheStore) remove(key string) {
 	cache.Unlock()
 	if path != "" {
 		_ = os.Remove(path)
-		_ = os.Remove(cache.stagePath(key))
+		stagingPath := cache.stagePath(key)
+		if fi, err := os.Stat(stagingPath); err == nil {
+			size := fi.Size()
+			if err = os.Remove(stagingPath); err == nil {
+				stageBlocks.Sub(1)
+				stageBlockBytes.Sub(float64(size))
+			}
+		}
 	}
 }
 
@@ -256,6 +257,9 @@ func (cache *cacheStore) load(key string) (ReadCloser, error) {
 			// update atime
 			cache.keys[key] = cacheItem{it.size, uint32(time.Now().Unix())}
 		}
+	} else if cache.keys[key].atime > 0 {
+		cache.used -= int64(cache.keys[key].size + 4096)
+		delete(cache.keys, key)
 	}
 	return f, err
 }
@@ -273,7 +277,7 @@ func (cache *cacheStore) flush() {
 	for {
 		w := <-cache.pending
 		path := cache.cachePath(w.key)
-		if cache.capacity > 0 && cache.flushPage(path, w.page.Data, false) == nil {
+		if cache.capacity > 0 && cache.flushPage(path, w.page.Data) == nil {
 			cache.add(w.key, int32(len(w.page.Data)), uint32(time.Now().Unix()))
 		}
 		cache.Lock()
@@ -309,14 +313,21 @@ func (cache *cacheStore) add(key string, size int32, atime uint32) {
 
 func (cache *cacheStore) stage(key string, data []byte, keepCache bool) (string, error) {
 	stagingPath := cache.stagePath(key)
-	err := cache.flushPage(stagingPath, data, false)
-	if err == nil && cache.capacity > 0 && keepCache {
-		path := cache.cachePath(key)
-		cache.createDir(filepath.Dir(path))
-		if err := os.Link(stagingPath, path); err == nil {
-			cache.add(key, -int32(len(data)), uint32(time.Now().Unix()))
-		} else {
-			logger.Warnf("link %s to %s failed: %s", stagingPath, path, err)
+	if cache.full {
+		return stagingPath, errors.New("Space not enough on device")
+	}
+	err := cache.flushPage(stagingPath, data)
+	if err == nil {
+		stageBlocks.Add(1)
+		stageBlockBytes.Add(float64(len(data)))
+		if cache.capacity > 0 && keepCache {
+			path := cache.cachePath(key)
+			cache.createDir(filepath.Dir(path))
+			if err := os.Link(stagingPath, path); err == nil {
+				cache.add(key, -int32(len(data)), uint32(time.Now().Unix()))
+			} else {
+				logger.Warnf("link %s to %s failed: %s", stagingPath, path, err)
+			}
 		}
 	}
 	return stagingPath, err
@@ -388,7 +399,7 @@ func (cache *cacheStore) cleanup() {
 	}
 	cache.Unlock()
 	for _, key := range todel {
-		os.Remove(cache.cachePath(key))
+		_ = os.Remove(cache.cachePath(key))
 	}
 	cache.Lock()
 }
@@ -424,7 +435,11 @@ func (cache *cacheStore) uploadStaging() {
 		cnt++
 		if cnt > 1 {
 			cache.Unlock()
-			cache.uploader(lastKey, cache.stagePath(lastKey))
+			if !cache.uploader(lastKey, cache.stagePath(lastKey), true) {
+				logger.Warnf("Upload list is too full")
+				cache.Lock()
+				return
+			}
 			logger.Debugf("upload %s, age: %d", lastKey, uint32(time.Now().Unix())-lastValue.atime)
 			cache.Lock()
 			// the size in keys should be updated
@@ -438,8 +453,9 @@ func (cache *cacheStore) uploadStaging() {
 	}
 	if cnt > 0 {
 		cache.Unlock()
-		cache.uploader(lastKey, cache.stagePath(lastKey))
-		logger.Debugf("upload %s, age: %d", lastKey, uint32(time.Now().Unix())-lastValue.atime)
+		if cache.uploader(lastKey, cache.stagePath(lastKey), true) {
+			logger.Debugf("upload %s, age: %d", lastKey, uint32(time.Now().Unix())-lastValue.atime)
+		}
 		cache.Lock()
 	}
 }
@@ -508,11 +524,13 @@ func (cache *cacheStore) scanStaging() {
 				}
 			} else {
 				logger.Debugf("Found staging block: %s", path)
+				stageBlocks.Add(1)
+				stageBlockBytes.Add(float64(fi.Size()))
 				key := path[len(stagingPrefix)+1:]
 				if runtime.GOOS == "windows" {
 					key = strings.ReplaceAll(key, "\\", "/")
 				}
-				cache.uploader(key, path)
+				cache.uploader(key, path, false)
 				count++
 			}
 		}
@@ -543,9 +561,12 @@ func hasMeta(path string) bool {
 	return strings.ContainsAny(path, magicChars)
 }
 
+var osPathSeparator = string([]byte{os.PathSeparator})
+
 func expandDir(pattern string) []string {
-	for strings.HasSuffix(pattern, "/") {
-		pattern = pattern[:len(pattern)-1]
+	pattern = strings.TrimRight(pattern, "/")
+	if runtime.GOOS == "windows" {
+		pattern = strings.TrimRight(pattern, osPathSeparator)
 	}
 	if pattern == "" {
 		return []string{"/"}
@@ -580,7 +601,7 @@ type CacheManager interface {
 	usedMemory() int64
 }
 
-func newCacheManager(config *Config, uploader func(key, path string)) CacheManager {
+func newCacheManager(config *Config, uploader func(key, path string, force bool) bool) CacheManager {
 	if config.CacheDir == "memory" || config.CacheSize == 0 {
 		return newMemStore(config)
 	}

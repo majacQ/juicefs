@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package chunk
@@ -30,6 +31,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/compress"
 	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/juicedata/juicefs/pkg/utils"
+	"github.com/juju/ratelimit"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -82,7 +84,35 @@ var (
 		Help:    "write cached block latency distribution",
 		Buckets: prometheus.ExponentialBuckets(0.00001, 2, 20),
 	})
+
+	objectReqsHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "object_request_durations_histogram_seconds",
+		Help:    "Object requests latency distributions.",
+		Buckets: prometheus.ExponentialBuckets(0.01, 1.5, 25),
+	}, []string{"method"})
+	objectReqErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "object_request_errors",
+		Help: "failed requests to object store",
+	})
+	objectDataBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "object_request_data_bytes",
+		Help: "Object requests size in bytes.",
+	}, []string{"method"})
+
+	stageBlocks = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "staging_blocks",
+		Help: "Number of blocks in the staging path.",
+	})
+	stageBlockBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "staging_block_bytes",
+		Help: "Total bytes of blocks in the staging path.",
+	})
 )
+
+type pendingItem struct {
+	key   string
+	fpath string
+}
 
 // chunk for read only
 type rChunk struct {
@@ -104,7 +134,7 @@ func (c *rChunk) blockSize(indx int) int {
 }
 
 func (c *rChunk) key(indx int) string {
-	if c.store.conf.Partitions > 1 {
+	if c.store.conf.HashPrefix {
 		return fmt.Sprintf("chunks/%02X/%v/%v_%v_%v", c.id%256, c.id/1000/1000, c.id, indx, c.blockSize(indx))
 	}
 	return fmt.Sprintf("chunks/%v/%v/%v_%v_%v", c.id/1000/1000, c.id/1000, c.id, indx, c.blockSize(indx))
@@ -131,19 +161,19 @@ func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err er
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if int(off) >= c.length {
+	if off >= c.length {
 		return 0, io.EOF
 	}
 
 	indx := c.index(off)
-	boff := int(off) % c.store.conf.BlockSize
+	boff := off % c.store.conf.BlockSize
 	blockSize := c.blockSize(indx)
 	if boff+len(p) > blockSize {
 		// read beyond currend page
 		var got int
 		for got < len(p) {
 			// aligned to current page
-			l := utils.Min(len(p)-got, c.blockSize(c.index(off))-int(off)%c.store.conf.BlockSize)
+			l := utils.Min(len(p)-got, c.blockSize(c.index(off))-off%c.store.conf.BlockSize)
 			pp := page.Slice(got, l)
 			n, err = c.ReadAt(ctx, pp, off)
 			pp.Release()
@@ -165,7 +195,7 @@ func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err er
 		r, err := c.store.bcache.load(key)
 		if err == nil {
 			n, err = r.ReadAt(p, int64(boff))
-			r.Close()
+			_ = r.Close()
 			if err == nil {
 				cacheHits.Add(1)
 				cacheHitBytes.Add(float64(n))
@@ -174,7 +204,7 @@ func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err er
 			}
 			if f, ok := r.(*os.File); ok {
 				logger.Warnf("remove partial cached block %s: %d %s", f.Name(), n, err)
-				os.Remove(f.Name())
+				_ = os.Remove(f.Name())
 			}
 		}
 	}
@@ -183,18 +213,28 @@ func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err er
 	cacheMissBytes.Add(float64(len(p)))
 
 	if c.store.seekable && boff > 0 && len(p) <= blockSize/4 {
+		if c.store.downLimit != nil {
+			c.store.downLimit.Wait(int64(len(p)))
+		}
 		// partial read
 		st := time.Now()
 		in, err := c.store.storage.Get(key, int64(boff), int64(len(p)))
+		if err == nil {
+			n, err = io.ReadFull(in, p)
+			_ = in.Close()
+		}
 		used := time.Since(st)
 		logger.Debugf("GET %s RANGE(%d,%d) (%s, %.3fs)", key, boff, len(p), err, used.Seconds())
 		if used > SlowRequest {
-			logger.Infof("slow request: GET %s (%s, %.3fs)", key, err, used.Seconds())
+			logger.Infof("slow request: GET %s (%v, %.3fs)", key, err, used.Seconds())
 		}
+		objectDataBytes.WithLabelValues("GET").Add(float64(n))
+		objectReqsHistogram.WithLabelValues("GET").Observe(used.Seconds())
 		c.store.fetcher.fetch(key)
 		if err == nil {
-			defer in.Close()
-			return io.ReadFull(in, p)
+			return n, nil
+		} else {
+			objectReqErrors.Add(1)
 		}
 	}
 
@@ -206,7 +246,7 @@ func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err er
 			tmp.Acquire()
 		}
 		tmp.Acquire()
-		err := withTimeout(func() error {
+		err := utils.WithTimeout(func() error {
 			defer tmp.Release()
 			return c.store.load(key, tmp, c.store.shouldCache(blockSize), false)
 		}, c.store.conf.GetTimeout)
@@ -229,7 +269,11 @@ func (c *rChunk) delete(indx int) error {
 	used := time.Since(st)
 	logger.Debugf("DELETE %v (%v, %.3fs)", key, err, used.Seconds())
 	if used > SlowRequest {
-		logger.Infof("slow request: DELETE %v (%s, %.3fs)", key, err, used.Seconds())
+		logger.Infof("slow request: DELETE %v (%v, %.3fs)", key, err, used.Seconds())
+	}
+	objectReqsHistogram.WithLabelValues("DELETE").Observe(used.Seconds())
+	if err != nil {
+		objectReqErrors.Add(1)
 	}
 	return err
 }
@@ -241,19 +285,24 @@ func (c *rChunk) Remove() error {
 	}
 
 	lastIndx := (c.length - 1) / c.store.conf.BlockSize
-	var err error
 	for i := 0; i <= lastIndx; i++ {
 		// there could be multiple clients try to remove the same chunk in the same time,
 		// any of them should succeed if any blocks is removed
 		key := c.key(i)
-		c.store.pendingMutex.Lock()
-		delete(c.store.pendingKeys, key)
-		c.store.pendingMutex.Unlock()
-		c.store.bcache.remove(key)
+		c.store.removeStaging(key)
+	}
+
+	if c.store.conf.MaxDeletes == 0 {
+		return errors.New("skip deleting objects because MaxDeletes is 0")
+	}
+	var err error
+	c.store.currentDelete <- struct{}{}
+	for i := 0; i <= lastIndx; i++ {
 		if e := c.delete(i); e != nil {
 			err = e
 		}
 	}
+	<-c.store.currentDelete
 	return err
 }
 
@@ -350,41 +399,33 @@ func (c *wChunk) WriteAt(p []byte, off int64) (n int, err error) {
 	return n, nil
 }
 
-func withTimeout(f func() error, timeout time.Duration) error {
-	var done = make(chan int, 1)
-	var t = time.NewTimer(timeout)
-	var err error
-	go func() {
-		err = f()
-		done <- 1
-	}()
-	select {
-	case <-done:
-		t.Stop()
-	case <-t.C:
-		err = fmt.Errorf("timeout after %s", timeout)
+func (store *cachedStore) put(key string, p *Page) error {
+	if store.upLimit != nil {
+		store.upLimit.Wait(int64(len(p.Data)))
 	}
-	return err
-}
-
-func (c *wChunk) put(key string, p *Page) error {
 	p.Acquire()
-	return withTimeout(func() error {
+	return utils.WithTimeout(func() error {
 		defer p.Release()
 		st := time.Now()
-		err := c.store.storage.Put(key, bytes.NewReader(p.Data))
+		err := store.storage.Put(key, bytes.NewReader(p.Data))
 		used := time.Since(st)
 		logger.Debugf("PUT %s (%s, %.3fs)", key, err, used.Seconds())
 		if used > SlowRequest {
-			logger.Infof("slow request: PUT %v (%s, %.3fs)", key, err, used.Seconds())
+			logger.Infof("slow request: PUT %v (%v, %.3fs)", key, err, used.Seconds())
+		}
+		objectDataBytes.WithLabelValues("PUT").Add(float64(len(p.Data)))
+		objectReqsHistogram.WithLabelValues("PUT").Observe(used.Seconds())
+		if err != nil {
+			objectReqErrors.Add(1)
 		}
 		return err
-	}, c.store.conf.PutTimeout)
+	}, store.conf.PutTimeout)
 }
 
-func (c *wChunk) syncUpload(key string, block *Page) {
+func (store *cachedStore) upload(key string, block *Page, c *wChunk) error {
+	sync := c != nil
 	blen := len(block.Data)
-	bufSize := c.store.compressor.CompressBound(blen)
+	bufSize := store.compressor.CompressBound(blen)
 	var buf *Page
 	if bufSize > blen {
 		buf = NewOffPage(bufSize)
@@ -392,112 +433,37 @@ func (c *wChunk) syncUpload(key string, block *Page) {
 		buf = block
 		buf.Acquire()
 	}
-	n, err := c.store.compressor.Compress(buf.Data, block.Data)
-	if err != nil {
-		logger.Fatalf("compress chunk %v: %s", c.id, err)
-		return
-	}
-	buf.Data = buf.Data[:n]
-	if blen < c.store.conf.BlockSize {
+	defer buf.Release()
+	if sync && blen < store.conf.BlockSize {
 		// block will be freed after written into disk
-		c.store.bcache.cache(key, block, false)
+		store.bcache.cache(key, block, false)
 	}
+	n, err := store.compressor.Compress(buf.Data, block.Data)
 	block.Release()
-
-	c.store.currentUpload <- true
-	defer func() {
-		buf.Release()
-		<-c.store.currentUpload
-	}()
-
-	try := 0
-	for try <= 10 && c.uploadError == nil {
-		err = c.put(key, buf)
-		if err == nil {
-			c.errors <- nil
-			return
-		}
-		try++
-		logger.Warnf("upload %s: %s (try %d)", key, err, try)
-		time.Sleep(time.Second * time.Duration(try*try))
-	}
-	c.errors <- fmt.Errorf("upload block %s: %s (after %d tries)", key, err, try)
-}
-
-func (c *wChunk) asyncUpload(key string, block *Page, stagingPath string) {
-	blockSize := len(block.Data)
-	defer c.store.bcache.uploaded(key, blockSize)
-	defer func() {
-		<-c.store.currentUpload
-	}()
-	select {
-	case c.store.currentUpload <- true:
-	default:
-		// release the memory and wait
-		block.Release()
-		c.store.pendingMutex.Lock()
-		c.store.pendingKeys[key] = time.Now()
-		c.store.pendingMutex.Unlock()
-		defer func() {
-			c.store.pendingMutex.Lock()
-			delete(c.store.pendingKeys, key)
-			c.store.pendingMutex.Unlock()
-		}()
-
-		logger.Debugf("wait to upload %s", key)
-		c.store.currentUpload <- true
-
-		// load from disk
-		f, err := os.Open(stagingPath)
-		if err != nil {
-			c.store.pendingMutex.Lock()
-			_, ok := c.store.pendingKeys[key]
-			c.store.pendingMutex.Unlock()
-			if ok {
-				logger.Errorf("read stagging file %s: %s", stagingPath, err)
-			} else {
-				logger.Debugf("%s is not needed, drop it", key)
-			}
-			return
-		}
-
-		block = NewOffPage(blockSize)
-		_, err = io.ReadFull(f, block.Data)
-		f.Close()
-		if err != nil {
-			logger.Errorf("read stagging file %s: %s", stagingPath, err)
-			block.Release()
-			return
-		}
-	}
-	bufSize := c.store.compressor.CompressBound(blockSize)
-	var buf *Page
-	if bufSize > blockSize {
-		buf = NewOffPage(bufSize)
-	} else {
-		buf = block
-		buf.Acquire()
-	}
-	n, err := c.store.compressor.Compress(buf.Data, block.Data)
 	if err != nil {
-		logger.Fatalf("compress chunk %v: %s", c.id, err)
-		return
+		return fmt.Errorf("Compress block key %s: %s", key, err)
 	}
 	buf.Data = buf.Data[:n]
-	block.Release()
 
-	try := 0
-	for c.uploadError == nil {
-		err = c.put(key, buf)
-		if err == nil {
+	try, max := 0, 3
+	if sync {
+		max = store.conf.MaxRetries + 1
+	}
+	for ; try < max; try++ {
+		time.Sleep(time.Second * time.Duration(try*try))
+		if c != nil && c.uploadError != nil {
+			err = fmt.Errorf("(cancelled) upload block %s: %s (after %d tries)", key, err, try)
 			break
 		}
-		logger.Warnf("upload %s: %s (tried %d)", key, err, try)
-		try++
-		time.Sleep(time.Second * time.Duration(try))
+		if err = store.put(key, buf); err == nil {
+			break
+		}
+		logger.Warnf("Upload %s: %s (try %d)", key, err, try+1)
 	}
-	buf.Release()
-	os.Remove(stagingPath)
+	if err != nil && try >= max {
+		err = fmt.Errorf("(max tries) upload block %s: %s (after %d tries)", key, err, try)
+	}
+	return err
 }
 
 func (c *wChunk) upload(indx int) {
@@ -509,38 +475,51 @@ func (c *wChunk) upload(indx int) {
 
 	go func() {
 		var block *Page
+		var off int
 		if len(pages) == 1 {
 			block = pages[0]
+			off = len(block.Data)
 		} else {
 			block = NewOffPage(blen)
-			var off int
 			for _, b := range pages {
 				off += copy(block.Data[off:], b.Data)
 				freePage(b)
 			}
-			if off != blen {
-				logger.Fatalf("block length does not match: %v != %v", off, blen)
-			}
+		}
+		if off != blen {
+			panic(fmt.Sprintf("block length does not match: %v != %v", off, blen))
 		}
 		if c.store.conf.Writeback {
 			stagingPath, err := c.store.bcache.stage(key, block.Data, c.store.shouldCache(blen))
 			if err != nil {
 				logger.Warnf("write %s to disk: %s, upload it directly", stagingPath, err)
-				c.syncUpload(key, block)
 			} else {
 				c.errors <- nil
 				if c.store.conf.UploadDelay == 0 {
-					go c.asyncUpload(key, block, stagingPath)
-				} else {
-					block.Release()
-					c.store.pendingMutex.Lock()
-					c.store.pendingKeys[key] = time.Now()
-					c.store.pendingMutex.Unlock()
+					select {
+					case c.store.currentUpload <- true:
+						defer func() { <-c.store.currentUpload }()
+						if err = c.store.upload(key, block, nil); err == nil {
+							c.store.bcache.uploaded(key, blen)
+							if os.Remove(stagingPath) == nil {
+								stageBlocks.Sub(1)
+								stageBlockBytes.Sub(float64(blen))
+							}
+						} else { // add to delay list and wait for later scanning
+							c.store.addDelayedStaging(key, stagingPath, time.Now().Add(time.Second*30), false)
+						}
+						return
+					default:
+					}
 				}
+				block.Release()
+				c.store.addDelayedStaging(key, stagingPath, time.Now(), c.store.conf.UploadDelay == 0)
+				return
 			}
-		} else {
-			c.syncUpload(key, block)
 		}
+		c.store.currentUpload <- true
+		defer func() { <-c.store.currentUpload }()
+		c.errors <- c.store.upload(key, block, c)
 	}()
 }
 
@@ -554,7 +533,7 @@ func (c *wChunk) Len() int {
 
 func (c *wChunk) FlushTo(offset int) error {
 	if offset < c.uploaded {
-		logger.Fatalf("Invalid offset: %d < %d", offset, c.uploaded)
+		panic(fmt.Sprintf("Invalid offset: %d < %d", offset, c.uploaded))
 	}
 	for i, block := range c.pages {
 		start := i * c.store.conf.BlockSize
@@ -609,9 +588,13 @@ type Config struct {
 	AutoCreate     bool
 	Compress       string
 	MaxUpload      int
+	MaxDeletes     int
+	MaxRetries     int
+	UploadLimit    int64 // bytes per second
+	DownloadLimit  int64 // bytes per second
 	Writeback      bool
 	UploadDelay    time.Duration
-	Partitions     int
+	HashPrefix     bool
 	BlockSize      int
 	GetTimeout     time.Duration
 	PutTimeout     time.Duration
@@ -628,10 +611,14 @@ type cachedStore struct {
 	conf          Config
 	group         *Controller
 	currentUpload chan bool
+	currentDelete chan struct{}
+	pendingCh     chan pendingItem
 	pendingKeys   map[string]time.Time
 	pendingMutex  sync.Mutex
 	compressor    compress.Compressor
 	seekable      bool
+	upLimit       *ratelimit.Bucket
+	downLimit     *ratelimit.Bucket
 }
 
 func (store *cachedStore) load(key string, page *Page, cache bool, forceCache bool) (err error) {
@@ -641,7 +628,12 @@ func (store *cachedStore) load(key string, page *Page, cache bool, forceCache bo
 			err = fmt.Errorf("recovered from %s", e)
 		}
 	}()
-
+	needed := store.compressor.CompressBound(len(page.Data))
+	compressed := needed > len(page.Data)
+	// we don't know the actual size for compressed block
+	if store.downLimit != nil && !compressed {
+		store.downLimit.Wait(int64(len(page.Data)))
+	}
 	err = errors.New("Not downloaded")
 	var in io.ReadCloser
 	tried := 0
@@ -649,36 +641,50 @@ func (store *cachedStore) load(key string, page *Page, cache bool, forceCache bo
 	// it will be retried outside
 	for err != nil && tried < 2 {
 		time.Sleep(time.Second * time.Duration(tried*tried))
-		st := time.Now()
-		in, err = store.storage.Get(key, 0, -1)
-		used := time.Since(st)
-		logger.Debugf("GET %s (%s, %.3fs)", key, err, used.Seconds())
-		if used > SlowRequest {
-			logger.Infof("slow request: GET %s (%s, %.3fs)", key, err, used.Seconds())
+		if tried > 0 {
+			logger.Warnf("GET %s: %s; retrying", key, err)
+			objectReqErrors.Add(1)
+			start = time.Now()
 		}
+		in, err = store.storage.Get(key, 0, -1)
 		tried++
 	}
+	var n int
+	var buf []byte
+	if err == nil {
+		if compressed {
+			c := NewOffPage(needed)
+			defer c.Release()
+			buf = c.Data
+		} else {
+			buf = page.Data
+		}
+		n, err = io.ReadFull(in, buf)
+		_ = in.Close()
+	}
+	if compressed && err == io.ErrUnexpectedEOF {
+		err = nil
+	}
+	used := time.Since(start)
+	logger.Debugf("GET %s (%s, %.3fs)", key, err, used.Seconds())
+	if used > SlowRequest {
+		logger.Infof("slow request: GET %s (%v, %.3fs)", key, err, used.Seconds())
+	}
+	if store.downLimit != nil && compressed {
+		store.downLimit.Wait(int64(n))
+	}
+	objectDataBytes.WithLabelValues("GET").Add(float64(n))
+	objectReqsHistogram.WithLabelValues("GET").Observe(used.Seconds())
 	if err != nil {
+		objectReqErrors.Add(1)
 		return fmt.Errorf("get %s: %s", key, err)
 	}
-	defer in.Close()
-	needed := store.compressor.CompressBound(len(page.Data))
-	var n int
-	if needed > len(page.Data) {
-		c := NewOffPage(needed)
-		defer c.Release()
-		var cn int
-		cn, err = io.ReadFull(in, c.Data)
-		if err != nil && (cn == 0 || err != io.ErrUnexpectedEOF) {
-			return err
-		}
-		n, err = store.compressor.Decompress(page.Data, c.Data[:cn])
-	} else {
-		n, err = io.ReadFull(in, page.Data)
+	if compressed {
+		n, err = store.compressor.Decompress(page.Data, buf[:n])
 	}
 	if err != nil || n < len(page.Data) {
 		return fmt.Errorf("read %s fully: %s (%d < %d) after %s (tried %d)", key, err, n, len(page.Data),
-			time.Since(start), tried)
+			used, tried)
 	}
 	if cache {
 		store.bcache.cache(key, page, forceCache)
@@ -687,10 +693,13 @@ func (store *cachedStore) load(key string, page *Page, cache bool, forceCache bo
 }
 
 // NewCachedStore create a cached store.
-func NewCachedStore(storage object.ObjectStorage, config Config) ChunkStore {
+func NewCachedStore(storage object.ObjectStorage, config Config, registerer prometheus.Registerer) ChunkStore {
 	compressor := compress.NewCompressor(config.Compress)
 	if compressor == nil {
 		logger.Fatalf("unknown compress algorithm: %s", config.Compress)
+	}
+	if config.MaxRetries == 0 {
+		config.MaxRetries = 10
 	}
 	if config.GetTimeout == 0 {
 		config.GetTimeout = time.Second * 60
@@ -702,12 +711,29 @@ func NewCachedStore(storage object.ObjectStorage, config Config) ChunkStore {
 		storage:       storage,
 		conf:          config,
 		currentUpload: make(chan bool, config.MaxUpload),
+		currentDelete: make(chan struct{}, config.MaxDeletes),
 		compressor:    compressor,
 		seekable:      compressor.CompressBound(0) == 0,
+		pendingCh:     make(chan pendingItem, 100*config.MaxUpload),
 		pendingKeys:   make(map[string]time.Time),
 		group:         &Controller{},
 	}
-	store.bcache = newCacheManager(&config, store.uploadStagingFile)
+	if config.UploadLimit > 0 {
+		// there are overheads coming from HTTP/TCP/IP
+		store.upLimit = ratelimit.NewBucketWithRate(float64(config.UploadLimit)*0.85, config.UploadLimit)
+	}
+	if config.DownloadLimit > 0 {
+		store.downLimit = ratelimit.NewBucketWithRate(float64(config.DownloadLimit)*0.85, config.DownloadLimit)
+	}
+	store.bcache = newCacheManager(&config, func(key, fpath string, force bool) bool {
+		if force {
+			return store.addDelayedStaging(key, fpath, time.Time{}, true)
+		} else if fi, err := os.Stat(fpath); err == nil {
+			return store.addDelayedStaging(key, fpath, fi.ModTime(), false)
+		} else {
+			return false
+		}
+	})
 	if config.CacheSize == 0 {
 		config.Prefetch = 0 // disable prefetch if cache is disabled
 	}
@@ -720,17 +746,43 @@ func NewCachedStore(storage object.ObjectStorage, config Config) ChunkStore {
 		defer p.Release()
 		_ = store.load(key, p, true, true)
 	})
-	_ = prometheus.Register(cacheHits)
-	_ = prometheus.Register(cacheHitBytes)
-	_ = prometheus.Register(cacheMiss)
-	_ = prometheus.Register(cacheMissBytes)
-	_ = prometheus.Register(cacheWrites)
-	_ = prometheus.Register(cacheWriteBytes)
-	_ = prometheus.Register(cacheDrops)
-	_ = prometheus.Register(cacheEvicts)
-	_ = prometheus.Register(cacheReadHist)
-	_ = prometheus.Register(cacheWriteHist)
-	_ = prometheus.Register(prometheus.NewGaugeFunc(
+	initMetrics(store, registerer)
+	if store.conf.CacheDir != "memory" && store.conf.Writeback {
+		for i := 0; i < store.conf.MaxUpload; i++ {
+			go store.uploader()
+		}
+		interval := time.Minute
+		if d := store.conf.UploadDelay; d > 0 {
+			logger.Infof("delay uploading by %s", d)
+			if d < time.Minute {
+				interval = d
+			}
+		}
+		go func() {
+			for {
+				time.Sleep(interval)
+				store.scanDelayedStaging()
+			}
+		}()
+	}
+	return store
+}
+
+func initMetrics(store *cachedStore, registerer prometheus.Registerer) {
+	if registerer == nil {
+		return
+	}
+	_ = registerer.Register(cacheHits)
+	_ = registerer.Register(cacheHitBytes)
+	_ = registerer.Register(cacheMiss)
+	_ = registerer.Register(cacheMissBytes)
+	_ = registerer.Register(cacheWrites)
+	_ = registerer.Register(cacheWriteBytes)
+	_ = registerer.Register(cacheDrops)
+	_ = registerer.Register(cacheEvicts)
+	_ = registerer.Register(cacheReadHist)
+	_ = registerer.Register(cacheWriteHist)
+	_ = registerer.Register(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "blockcache_blocks",
 			Help: "number of cached blocks",
@@ -739,7 +791,7 @@ func NewCachedStore(storage object.ObjectStorage, config Config) ChunkStore {
 			cnt, _ := store.bcache.stats()
 			return float64(cnt)
 		}))
-	_ = prometheus.Register(prometheus.NewGaugeFunc(
+	_ = registerer.Register(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "blockcache_bytes",
 			Help: "number of cached bytes",
@@ -748,24 +800,15 @@ func NewCachedStore(storage object.ObjectStorage, config Config) ChunkStore {
 			_, used := store.bcache.stats()
 			return float64(used)
 		}))
-	if store.conf.CacheDir != "memory" && store.conf.Writeback && store.conf.UploadDelay > 0 {
-		logger.Infof("delay uploading by %s", store.conf.UploadDelay)
-		go func() {
-			for {
-				if store.conf.UploadDelay > time.Minute {
-					time.Sleep(time.Minute)
-				} else {
-					time.Sleep(store.conf.UploadDelay)
-				}
-				store.uploadDelayedStaging()
-			}
-		}()
-	}
-	return store
+	_ = registerer.Register(objectReqsHistogram)
+	_ = registerer.Register(objectReqErrors)
+	_ = registerer.Register(objectDataBytes)
+	_ = registerer.Register(stageBlocks)
+	_ = registerer.Register(stageBlockBytes)
 }
 
 func (store *cachedStore) shouldCache(size int) bool {
-	return size < store.conf.BlockSize || store.conf.CacheFullBlock
+	return store.conf.CacheFullBlock || size < store.conf.BlockSize || store.conf.UploadDelay > 0
 }
 
 func parseObjOrigSize(key string) int {
@@ -776,69 +819,87 @@ func parseObjOrigSize(key string) int {
 
 func (store *cachedStore) uploadStagingFile(key string, stagingPath string) {
 	store.currentUpload <- true
-	go func() {
-		defer func() {
-			<-store.currentUpload
-		}()
-
-		f, err := os.Open(stagingPath)
-		if err != nil {
-			logger.Errorf("open %s: %s", stagingPath, err)
-			return
-		}
-		blockSize := parseObjOrigSize(key)
-		block := NewOffPage(blockSize)
-		_, err = io.ReadFull(f, block.Data)
-		f.Close()
-		if err != nil {
-			block.Release()
-			logger.Errorf("read %s: %s", stagingPath, err)
-			return
-		}
-		buf := NewOffPage(store.compressor.CompressBound(blockSize))
-		defer buf.Release()
-		n, err := store.compressor.Compress(buf.Data, block.Data)
-		block.Release()
-		if err != nil {
-			logger.Errorf("compress chunk %s: %s", stagingPath, err)
-			return
-		}
-		compressed := buf.Data[:n]
-		try := 0
-		for {
-			st := time.Now()
-			err := store.storage.Put(key, bytes.NewReader(compressed))
-			used := time.Since(st)
-			logger.Debugf("PUT %s (%s, %.3fs)", key, err, used.Seconds())
-			if used > SlowRequest {
-				logger.Infof("slow request: PUT %v (%s, %.3fs)", key, err, used.Seconds())
-			}
-			if err == nil {
-				break
-			}
-			logger.Warnf("upload %s: %s (try %d)", key, err, try)
-			try++
-			time.Sleep(time.Second * time.Duration(try*try))
-		}
-		store.bcache.uploaded(key, blockSize)
-		store.pendingMutex.Lock()
-		delete(store.pendingKeys, key)
-		store.pendingMutex.Unlock()
-		_ = os.Remove(stagingPath)
+	defer func() {
+		<-store.currentUpload
 	}()
+
+	store.pendingMutex.Lock()
+	_, ok := store.pendingKeys[key]
+	store.pendingMutex.Unlock()
+	if !ok {
+		logger.Debugf("Key %s is not needed, drop it", key)
+		return
+	}
+	f, err := os.Open(stagingPath)
+	if err != nil {
+		store.pendingMutex.Lock()
+		_, ok = store.pendingKeys[key]
+		store.pendingMutex.Unlock()
+		if ok {
+			logger.Errorf("Open staging file %s: %s", stagingPath, err)
+		} else {
+			logger.Debugf("Key %s is not needed, drop it", key)
+		}
+		return
+	}
+	blen := parseObjOrigSize(key)
+	block := NewOffPage(blen)
+	_, err = io.ReadFull(f, block.Data)
+	_ = f.Close()
+	if err != nil {
+		block.Release()
+		logger.Errorf("Read staging file %s: %s", stagingPath, err)
+		return
+	}
+
+	if err = store.upload(key, block, nil); err == nil {
+		store.bcache.uploaded(key, blen)
+		store.removeStaging(key)
+		if os.Remove(stagingPath) == nil {
+			stageBlocks.Sub(1)
+			stageBlockBytes.Sub(float64(blen))
+		}
+	}
 }
 
-func (store *cachedStore) uploadDelayedStaging() {
+func (store *cachedStore) addDelayedStaging(key, stagingPath string, added time.Time, force bool) bool {
 	store.pendingMutex.Lock()
+	store.pendingKeys[key] = added
+	store.pendingMutex.Unlock()
+	if force || time.Since(added) > store.conf.UploadDelay {
+		select {
+		case store.pendingCh <- pendingItem{key, stagingPath}:
+			return true
+		default:
+		}
+	}
+	return false
+}
+
+func (store *cachedStore) removeStaging(key string) {
+	store.pendingMutex.Lock()
+	delete(store.pendingKeys, key)
+	store.pendingMutex.Unlock()
+	store.bcache.remove(key)
+}
+
+func (store *cachedStore) scanDelayedStaging() {
 	cutoff := time.Now().Add(-store.conf.UploadDelay)
+	store.pendingMutex.Lock()
+	defer store.pendingMutex.Unlock()
 	for key, added := range store.pendingKeys {
 		store.pendingMutex.Unlock()
 		if added.Before(cutoff) {
-			store.uploadStagingFile(key, store.bcache.stagePath(key))
+			store.pendingCh <- pendingItem{key, store.bcache.stagePath(key)}
 		}
 		store.pendingMutex.Lock()
 	}
-	store.pendingMutex.Unlock()
+}
+
+func (store *cachedStore) uploader() {
+	for it := range store.pendingCh {
+		store.uploadStagingFile(it.key, it.fpath)
+	}
 }
 
 func (store *cachedStore) NewReader(chunkid uint64, length int) Reader {
@@ -857,10 +918,11 @@ func (store *cachedStore) Remove(chunkid uint64, length int) error {
 func (store *cachedStore) FillCache(chunkid uint64, length uint32) error {
 	r := chunkForRead(chunkid, int(length), store)
 	keys := r.keys()
+	var err error
 	for _, k := range keys {
-		f, err := store.bcache.load(k)
-		if err == nil { // already cached
-			f.Close()
+		f, e := store.bcache.load(k)
+		if e == nil { // already cached
+			_ = f.Close()
 			continue
 		}
 		size := parseObjOrigSize(k)
@@ -870,11 +932,12 @@ func (store *cachedStore) FillCache(chunkid uint64, length uint32) error {
 		}
 		p := NewOffPage(size)
 		defer p.Release()
-		if err = store.load(k, p, true, true); err != nil {
-			logger.Warnf("Failed to load key: %s %s", k, err)
+		if e := store.load(k, p, true, true); e != nil {
+			logger.Warnf("Failed to load key: %s %s", k, e)
+			err = e
 		}
 	}
-	return nil // currently errors are skipped
+	return err
 }
 
 func (store *cachedStore) UsedMemory() int64 {

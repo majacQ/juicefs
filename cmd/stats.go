@@ -1,24 +1,27 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +29,43 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/urfave/cli/v2"
 )
+
+func cmdStats() *cli.Command {
+	return &cli.Command{
+		Name:      "stats",
+		Action:    stats,
+		Category:  "INSPECTOR",
+		Usage:     "Show real time performance statistics of JuiceFS",
+		ArgsUsage: "MOUNTPOINT",
+		Description: `
+This is a tool that reads Prometheus metrics and shows real time statistics of the target mount point.
+
+Examples:
+$ juicefs stats /mnt/jfs
+
+# More metrics
+$ juicefs stats /mnt/jfs -l 1
+
+Details: https://juicefs.com/docs/community/stats_watcher`,
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:  "schema",
+				Value: "ufmco",
+				Usage: "schema string that controls the output sections (u: usage, f: fuse, m: meta, c: blockcache, o: object, g: go)",
+			},
+			&cli.UintFlag{
+				Name:  "interval",
+				Value: 1,
+				Usage: "interval in seconds between each update",
+			},
+			&cli.UintFlag{
+				Name:    "verbosity",
+				Aliases: []string{"l"},
+				Usage:   "verbosity level, 0 or 1 is enough for most cases",
+			},
+		},
+	}
+}
 
 const (
 	BLACK = 30 + iota
@@ -36,6 +76,7 @@ const (
 	MAGENTA
 	CYAN
 	WHITE
+	DEFAULT = "00"
 )
 
 const (
@@ -132,8 +173,8 @@ func (w *statsWatcher) buildSchema(schema string, verbosity uint) {
 			}
 		case 'g':
 			s.name = "go"
-			s.items = append(s.items, &item{"alloc", "go_memstats_alloc_bytes", metricGauge})
-			s.items = append(s.items, &item{"sys", "go_memstats_sys_bytes", metricGauge})
+			s.items = append(s.items, &item{"alloc", "juicefs_go_memstats_alloc_bytes", metricGauge})
+			s.items = append(s.items, &item{"sys", "juicefs_go_memstats_sys_bytes", metricGauge})
 		default:
 			fmt.Printf("Warning: no item defined for %c\n", r)
 			continue
@@ -187,9 +228,7 @@ func (w *statsWatcher) formatHeader() {
 }
 
 func (w *statsWatcher) formatU64(v float64, dark, isByte bool) string {
-	if v < 0.0 {
-		logger.Fatalf("invalid value %f", v)
-	} else if v == 0.0 {
+	if v <= 0.0 {
 		return w.colorize("   0 ", BLACK, false, false)
 	}
 	var vi uint64
@@ -222,9 +261,7 @@ func (w *statsWatcher) formatTime(v float64, dark bool) string {
 	var ret string
 	var color int
 	switch {
-	case v < 0.0:
-		logger.Fatalf("invalid value %f", v)
-	case v == 0.0:
+	case v <= 0.0:
 		ret, color, dark = "   0 ", BLACK, false
 	case v < 10.0:
 		ret, color = fmt.Sprintf("%4.2f ", v), GREEN
@@ -242,9 +279,7 @@ func (w *statsWatcher) formatCPU(v float64, dark bool) string {
 	var ret string
 	var color int
 	switch v = v * 100.0; {
-	case v < 0.0:
-		logger.Fatalf("invalid value %f", v)
-	case v == 0.0:
+	case v <= 0.0:
 		ret, color = " 0.0", WHITE
 	case v < 30.0:
 		ret, color = fmt.Sprintf("%4.1f", v), GREEN
@@ -283,7 +318,7 @@ func (w *statsWatcher) printDiff(left, right map[string]float64, dark bool) {
 			case metricHist: // metricTime
 				count := right[it.name+"_total"] - left[it.name+"_total"]
 				var avg float64
-				if count != 0.0 {
+				if count > 0.0 {
 					cost := right[it.name+"_sum"] - left[it.name+"_sum"]
 					if it.typ&metricTime != 0 {
 						cost *= 1000 // s -> ms
@@ -305,11 +340,34 @@ func (w *statsWatcher) printDiff(left, right map[string]float64, dark bool) {
 	}
 }
 
-func stats(ctx *cli.Context) error {
-	setLoggerLevel(ctx)
-	if ctx.Args().Len() < 1 {
-		logger.Fatalln("mount point must be provided")
+func readStats(path string) map[string]float64 {
+	f, err := os.Open(path)
+	if err != nil {
+		logger.Warnf("open %s: %s", path, err)
+		return nil
 	}
+	defer f.Close()
+	d, err := ioutil.ReadAll(f)
+	if err != nil {
+		logger.Warnf("read %s: %s", path, err)
+		return nil
+	}
+	stats := make(map[string]float64)
+	lines := strings.Split(string(d), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 2 {
+			stats[fields[0]], err = strconv.ParseFloat(fields[1], 64)
+			if err != nil {
+				logger.Warnf("parse %s: %s", fields[1], err)
+			}
+		}
+	}
+	return stats
+}
+
+func stats(ctx *cli.Context) error {
+	setup(ctx, 1)
 	mp := ctx.Args().First()
 	inode, err := utils.GetFileInode(mp)
 	if err != nil {
@@ -320,7 +378,7 @@ func stats(ctx *cli.Context) error {
 	}
 
 	watcher := &statsWatcher{
-		tty:      !ctx.Bool("nocolor") && isatty.IsTerminal(os.Stdout.Fd()),
+		tty:      !ctx.Bool("no-color") && isatty.IsTerminal(os.Stdout.Fd()),
 		interval: ctx.Uint("interval"),
 		path:     path.Join(mp, ".stats"),
 	}
@@ -348,34 +406,5 @@ func stats(ctx *cli.Context) error {
 		tick++
 		<-ticker.C
 		current = readStats(watcher.path)
-	}
-}
-
-func statsFlags() *cli.Command {
-	return &cli.Command{
-		Name:      "stats",
-		Usage:     "show runtime stats",
-		Action:    stats,
-		ArgsUsage: "MOUNTPOINT",
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:  "schema",
-				Value: "ufmco",
-				Usage: "schema string that controls the output sections (u: usage, f: fuse, m: meta, c: blockcache, o: object, g: go)",
-			},
-			&cli.UintFlag{
-				Name:  "interval",
-				Value: 1,
-				Usage: "interval in seconds between each update",
-			},
-			&cli.UintFlag{
-				Name:  "verbosity",
-				Usage: "verbosity level, 0 or 1 is enough for most cases",
-			},
-			&cli.BoolFlag{
-				Name:  "nocolor",
-				Usage: "disable colors",
-			},
-		},
 	}
 }

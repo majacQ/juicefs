@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package sync
@@ -33,15 +34,23 @@ type Config struct {
 	Dirs        bool
 	Exclude     []string
 	Include     []string
+	Links       bool
+	Limit       int64
 	Manager     string
 	Workers     []string
 	BWLimit     int
 	NoHTTPS     bool
 	Verbose     bool
 	Quiet       bool
+	CheckAll    bool
+	CheckNew    bool
 }
 
 func NewConfigFromCli(c *cli.Context) *Config {
+	if c.IsSet("limits") && c.Int64("limits") < 0 {
+		logger.Fatal("The limits parameter must be a non-negative integer")
+	}
+
 	return &Config{
 		Start:       c.String("start"),
 		End:         c.String("end"),
@@ -55,11 +64,15 @@ func NewConfigFromCli(c *cli.Context) *Config {
 		DeleteDst:   c.Bool("delete-dst"),
 		Exclude:     c.StringSlice("exclude"),
 		Include:     c.StringSlice("include"),
+		Links:       c.Bool("links"),
+		Limit:       c.Int64("limit"),
 		Workers:     c.StringSlice("worker"),
 		Manager:     c.String("manager"),
 		BWLimit:     c.Int("bwlimit"),
 		NoHTTPS:     c.Bool("no-https"),
 		Verbose:     c.Bool("verbose"),
 		Quiet:       c.Bool("quiet"),
+		CheckAll:    c.Bool("check-all"),
+		CheckNew:    c.Bool("check-new"),
 	}
 }

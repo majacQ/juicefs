@@ -1,24 +1,25 @@
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -34,6 +35,14 @@ var UserAgent = "JuiceFS"
 type MtimeChanger interface {
 	Chtimes(path string, mtime time.Time) error
 }
+
+type SupportSymlink interface {
+	// Symlink create a symbolic link
+	Symlink(oldName, newName string) error
+	// Readlink read a symbolic link
+	Readlink(name string) (string, error)
+}
+
 type File interface {
 	Object
 	Owner() string
@@ -41,16 +50,22 @@ type File interface {
 	Mode() os.FileMode
 }
 
+type onlyWriter struct {
+	io.Writer
+}
+
 type file struct {
 	obj
-	owner string
-	group string
-	mode  os.FileMode
+	owner     string
+	group     string
+	mode      os.FileMode
+	isSymlink bool
 }
 
 func (f *file) Owner() string     { return f.owner }
 func (f *file) Group() string     { return f.group }
 func (f *file) Mode() os.FileMode { return f.mode }
+func (f *file) IsSymlink() bool   { return f.isSymlink }
 
 func MarshalObject(o Object) map[string]interface{} {
 	m := make(map[string]interface{})
@@ -62,15 +77,20 @@ func MarshalObject(o Object) map[string]interface{} {
 		m["mode"] = f.Mode()
 		m["owner"] = f.Owner()
 		m["group"] = f.Group()
+		m["isSymlink"] = f.IsSymlink()
 	}
 	return m
 }
 
 func UnmarshalObject(m map[string]interface{}) Object {
 	mtime := time.Unix(0, int64(m["mtime"].(float64)))
-	o := obj{m["key"].(string), int64(m["size"].(float64)), mtime, m["isdir"].(bool)}
+	o := obj{
+		key:   m["key"].(string),
+		size:  int64(m["size"].(float64)),
+		mtime: mtime,
+		isDir: m["isdir"].(bool)}
 	if _, ok := m["mode"]; ok {
-		f := file{o, m["owner"].(string), m["group"].(string), os.FileMode(m["mode"].(float64))}
+		f := file{o, m["owner"].(string), m["group"].(string), os.FileMode(m["mode"].(float64)), m["isSymlink"].(bool)}
 		return &f
 	}
 	return &o
@@ -82,7 +102,7 @@ type FileSystem interface {
 	Chown(path string, owner, group string) error
 }
 
-var notSupported = errors.New("not supported")
+var notSupported = utils.ENOTSUP
 
 type DefaultObjectStorage struct{}
 

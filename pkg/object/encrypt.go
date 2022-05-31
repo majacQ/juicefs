@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -59,19 +60,9 @@ func ExportRsaPrivateKeyToPem(key *rsa.PrivateKey, passphrase string) string {
 	return string(privPEM)
 }
 
-func ParseRsaPrivateKeyFromPem(privPEM string, passphrase string) (*rsa.PrivateKey, error) {
-	block, _ := pem.Decode([]byte(privPEM))
-	if block == nil {
-		return nil, errors.New("failed to parse PEM block containing the key")
-	}
-
+func ParseRsaPrivateKeyFromPem(block *pem.Block, passphrase string) (*rsa.PrivateKey, error) {
 	buf := block.Bytes
-	// nolint:staticcheck
-	if strings.Contains(block.Headers["Proc-Type"], "ENCRYPTED") &&
-		x509.IsEncryptedPEMBlock(block) {
-		if passphrase == "" {
-			return nil, fmt.Errorf("passphrase is required to private key")
-		}
+	if passphrase != "" {
 		var err error
 		// nolint:staticcheck
 		buf, err = x509.DecryptPEMBlock(block, []byte(passphrase))
@@ -81,8 +72,6 @@ func ParseRsaPrivateKeyFromPem(privPEM string, passphrase string) (*rsa.PrivateK
 			}
 			return nil, fmt.Errorf("cannot decode encrypted private keys: %v", err)
 		}
-	} else if passphrase != "" {
-		logger.Warningf("passphrase is not used, because private key is not encrypted")
 	}
 
 	priv, err := x509.ParsePKCS1PrivateKey(buf)
@@ -98,7 +87,19 @@ func ParseRsaPrivateKeyFromPath(path, passphrase string) (*rsa.PrivateKey, error
 	if err != nil {
 		return nil, err
 	}
-	return ParseRsaPrivateKeyFromPem(string(b), passphrase)
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, errors.New("failed to parse PEM block containing the key")
+	}
+	// nolint:staticcheck
+	if strings.Contains(block.Headers["Proc-Type"], "ENCRYPTED") && x509.IsEncryptedPEMBlock(block) {
+		if passphrase == "" {
+			return nil, fmt.Errorf("passphrase is required to private key, please try again after setting the 'JFS_RSA_PASSPHRASE' environment variable")
+		}
+	} else if passphrase != "" {
+		logger.Warningf("passphrase is not used, because private key is not encrypted")
+	}
+	return ParseRsaPrivateKeyFromPem(block, passphrase)
 }
 
 func NewRSAEncryptor(privKey *rsa.PrivateKey) Encryptor {
@@ -214,7 +215,7 @@ func (e *encrypted) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	}
 	l := int64(len(plain))
 	if off > l {
-		return nil, io.EOF
+		off = l
 	}
 	if limit == -1 || off+limit > l {
 		limit = l - off

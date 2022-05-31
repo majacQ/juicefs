@@ -1,18 +1,20 @@
+//go:build !noibmcos
 // +build !noibmcos
 
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -22,13 +24,17 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/IBM/ibm-cos-sdk-go/aws"
+	"github.com/IBM/ibm-cos-sdk-go/aws/awserr"
 	"github.com/IBM/ibm-cos-sdk-go/aws/credentials/ibmiam"
 	"github.com/IBM/ibm-cos-sdk-go/aws/session"
 	"github.com/IBM/ibm-cos-sdk-go/service/s3"
+	"github.com/juicedata/juicefs/pkg/utils"
 )
 
 type ibmcos struct {
@@ -77,10 +83,12 @@ func (s *ibmcos) Put(key string, in io.Reader) error {
 		}
 		body = bytes.NewReader(data)
 	}
+	mimeType := utils.GuessMimeType(key)
 	params := &s3.PutObjectInput{
-		Bucket: &s.bucket,
-		Key:    &key,
-		Body:   body,
+		Bucket:      &s.bucket,
+		Key:         &key,
+		Body:        body,
+		ContentType: &mimeType,
 	}
 	_, err := s.s3.PutObject(params)
 	return err
@@ -104,6 +112,9 @@ func (s *ibmcos) Head(key string) (Object, error) {
 	}
 	r, err := s.s3.HeadObject(&param)
 	if err != nil {
+		if e, ok := err.(awserr.RequestFailure); ok && e.StatusCode() == http.StatusNotFound {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 	return &obj{
@@ -223,6 +234,9 @@ func (s *ibmcos) ListUploads(marker string) ([]*PendingPart, string, error) {
 }
 
 func newIBMCOS(endpoint, apiKey, serviceInstanceID string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, _ := url.ParseRequestURI(endpoint)
 	hostParts := strings.Split(uri.Host, ".")
 	bucket := hostParts[0]

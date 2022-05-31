@@ -1,18 +1,20 @@
+//go:build !noazure
 // +build !noazure
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -20,70 +22,75 @@ package object
 import (
 	"fmt"
 	"io"
-	"log"
+	"net"
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
-	"github.com/Azure/azure-sdk-for-go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 )
 
 type wasb struct {
 	DefaultObjectStorage
-	container *storage.Container
+	container *azblob.ContainerClient
+	cName     string
 	marker    string
 }
 
 func (b *wasb) String() string {
-	return fmt.Sprintf("wasb://%s/", b.container.Name)
+	return fmt.Sprintf("wasb://%s/", b.cName)
 }
 
 func (b *wasb) Create() error {
-	_, err := b.container.CreateIfNotExists(&storage.CreateContainerOptions{})
+	_, err := b.container.Create(ctx, nil)
+	if err != nil && strings.Contains(err.Error(), string(azblob.StorageErrorCodeContainerAlreadyExists)) {
+		return nil
+	}
 	return err
 }
 
 func (b *wasb) Head(key string) (Object, error) {
-	blob := b.container.GetBlobReference(key)
-	err := blob.GetProperties(nil)
+	properties, err := b.container.NewBlobClient(key).GetProperties(ctx, &azblob.GetBlobPropertiesOptions{})
 	if err != nil {
+		if strings.Contains(err.Error(), string(azblob.StorageErrorCodeBlobNotFound)) {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 
 	return &obj{
-		blob.Name,
-		blob.Properties.ContentLength,
-		time.Time(blob.Properties.LastModified),
-		strings.HasSuffix(blob.Name, "/"),
+		key,
+		*properties.ContentLength,
+		*properties.LastModified,
+		strings.HasSuffix(key, "/"),
 	}, nil
 }
 
 func (b *wasb) Get(key string, off, limit int64) (io.ReadCloser, error) {
-	blob := b.container.GetBlobReference(key)
-	var end int64
-	if limit > 0 {
-		end = off + limit - 1
+	download, err := b.container.NewBlockBlobClient(key).Download(ctx, &azblob.DownloadBlobOptions{Offset: &off, Count: &limit})
+	if err != nil {
+		return nil, err
 	}
-	return blob.GetRange(&storage.GetBlobRangeOptions{
-		Range: &storage.BlobRange{
-			Start: uint64(off),
-			End:   uint64(end),
-		},
-	})
+	return download.BlobDownloadResponse.RawResponse.Body, err
 }
 
 func (b *wasb) Put(key string, data io.Reader) error {
-	return b.container.GetBlobReference(key).CreateBlockBlobFromReader(data, nil)
+	_, err := b.container.NewBlockBlobClient(key).UploadStreamToBlockBlob(ctx, data, azblob.UploadStreamToBlockBlobOptions{})
+	return err
 }
 
 func (b *wasb) Copy(dst, src string) error {
-	uri := b.container.GetBlobReference(src).GetURL()
-	return b.container.GetBlobReference(dst).Copy(uri, nil)
+	_, err := b.container.NewBlockBlobClient(dst).CopyFromURL(ctx, b.container.NewBlockBlobClient(src).URL(),
+		&azblob.CopyBlockBlobFromURLOptions{})
+	return err
 }
 
 func (b *wasb) Delete(key string) error {
-	return b.container.GetBlobReference(key).Delete(nil)
+	_, err := b.container.NewBlockBlobClient(key).Delete(ctx, &azblob.DeleteBlobOptions{})
+	if err != nil && strings.Contains(err.Error(), string(azblob.StorageErrorCodeBlobNotFound)) {
+		err = nil
+	}
+	return err
 }
 
 func (b *wasb) List(prefix, marker string, limit int64) ([]Object, error) {
@@ -94,51 +101,47 @@ func (b *wasb) List(prefix, marker string, limit int64) ([]Object, error) {
 		}
 		marker = b.marker
 	}
-	resp, err := b.container.ListBlobs(storage.ListBlobsParameters{
-		Prefix:     prefix,
-		Marker:     marker,
-		MaxResults: uint(limit),
-	})
-	if err != nil {
+
+	limit32 := int32(limit)
+	pager := b.container.ListBlobsFlat(&azblob.ContainerListBlobFlatSegmentOptions{Prefix: &prefix, Marker: &marker, Maxresults: &(limit32)})
+	if pager.NextPage(ctx) {
+		b.marker = *pager.PageResponse().NextMarker
+	} else {
 		b.marker = ""
-		return nil, err
 	}
-	b.marker = resp.NextMarker
-	n := len(resp.Blobs)
+	n := len(pager.PageResponse().Segment.BlobItems)
 	objs := make([]Object, n)
 	for i := 0; i < n; i++ {
-		blob := resp.Blobs[i]
-		mtime := time.Time(blob.Properties.LastModified)
+		blob := pager.PageResponse().Segment.BlobItems[i]
+		mtime := blob.Properties.LastModified
 		objs[i] = &obj{
-			blob.Name,
-			int64(blob.Properties.ContentLength),
-			mtime,
-			strings.HasSuffix(blob.Name, "/"),
+			*blob.Name,
+			*blob.Properties.ContentLength,
+			*mtime,
+			strings.HasSuffix(*blob.Name, "/"),
 		}
 	}
 	return objs, nil
 }
 
-// TODO: support multipart upload
-
-func autoWasbEndpoint(containerName, accountName, accountKey string, useHTTPS bool) (string, error) {
-	baseURLs := []string{"core.windows.net", "core.chinacloudapi.cn"}
+func autoWasbEndpoint(containerName, accountName, scheme string, credential *azblob.SharedKeyCredential) (string, error) {
+	baseURLs := []string{"blob.core.windows.net", "blob.core.chinacloudapi.cn"}
 	endpoint := ""
 	for _, baseURL := range baseURLs {
-		client, err := storage.NewClient(accountName, accountKey, baseURL, "2017-04-17", useHTTPS)
-		if err != nil {
-			log.Fatalf("Failed to create client: %v", err)
-		}
-		blobService := client.GetBlobService()
-		resp, err := blobService.ListContainers(storage.ListContainersParameters{Prefix: containerName, MaxResults: 1})
-		if err != nil {
-			logger.Debugf("Try to list containers at %s failed: %s", baseURL, err)
+		if _, err := net.LookupIP(fmt.Sprintf("%s.%s", accountName, baseURL)); err != nil {
+			logger.Debugf("Attempt to resolve domain name %s failed: %s", baseURL, err)
 			continue
 		}
-		if len(resp.Containers) == 1 {
-			endpoint = baseURL
-			break
+		client, err := azblob.NewContainerClientWithSharedKey(fmt.Sprintf("%s://%s.%s/%s", scheme, accountName, baseURL, containerName), credential, nil)
+		if err != nil {
+			return "", err
 		}
+		if _, err = client.GetProperties(ctx, nil); err != nil {
+			logger.Debugf("Try to get containers properties at %s failed: %s", baseURL, err)
+			continue
+		}
+		endpoint = baseURL
+		break
 	}
 
 	if endpoint == "" {
@@ -148,6 +151,9 @@ func autoWasbEndpoint(containerName, accountName, accountKey string, useHTTPS bo
 }
 
 func newWabs(endpoint, accountName, accountKey string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint: %v, error: %v", endpoint, err)
@@ -179,26 +185,30 @@ func newWabs(endpoint, accountName, accountKey string) (ObjectStorage, error) {
 			}
 		}
 	}
+	credential, err := azblob.NewSharedKeyCredential(accountName, accountKey)
+	if err != nil {
+		return nil, err
+	}
+
 	if scheme == "" {
 		scheme = "https"
 	}
-	name := hostParts[0]
+	containerName := hostParts[0]
 	if len(hostParts) > 1 {
 		// Arguments from command line take precedence
 		domain = hostParts[1]
 	} else if domain == "" {
-		if domain, err = autoWasbEndpoint(name, accountName, accountKey, scheme == "https"); err != nil {
-			return nil, fmt.Errorf("Unable to get endpoint of container %s: %s", name, err)
+		if domain, err = autoWasbEndpoint(containerName, accountName, scheme, credential); err != nil {
+			return nil, fmt.Errorf("Unable to get endpoint of container %s: %s", containerName, err)
 		}
 	}
 
-	client, err := storage.NewClient(accountName, accountKey, domain, "2017-04-17", scheme == "https")
+	client, err := azblob.NewContainerClientWithSharedKey(fmt.Sprintf("%s://%s.%s/%s", scheme, accountName, domain, containerName), credential, nil)
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		return nil, err
 	}
-	service := client.GetBlobService()
-	container := service.GetContainerReference(name)
-	return &wasb{container: container}, nil
+
+	return &wasb{container: &client, cName: containerName}, nil
 }
 
 func init() {

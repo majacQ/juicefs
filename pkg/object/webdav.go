@@ -1,18 +1,20 @@
+//go:build !nowebdav
 // +build !nowebdav
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -23,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 
@@ -46,6 +49,9 @@ func (w *webdav) Create() error {
 func (w *webdav) Head(key string) (Object, error) {
 	info, err := w.c.Stat(key)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 	return &obj{
@@ -87,7 +93,7 @@ func (w *webdav) Get(key string, off, limit int64) (io.ReadCloser, error) {
 
 func (w *webdav) mkdirs(p string) error {
 	err := w.c.Mkdir(p)
-	if err != nil && w.isNotExist(err) {
+	if err != nil && w.isNotExist(path.Dir(p)) {
 		if w.mkdirs(path.Dir(p)) == nil {
 			err = w.c.Mkdir(p)
 		}
@@ -95,23 +101,36 @@ func (w *webdav) mkdirs(p string) error {
 	return err
 }
 
-func (w *webdav) isNotExist(err error) bool {
-	return strings.Contains(err.Error(), "Not Found")
+func (w *webdav) isNotExist(key string) bool {
+	if _, err := w.c.Stat(key); err != nil {
+		return strings.Contains(strings.ToLower(err.Error()), "not found")
+	}
+	return false
+}
+
+func (w *webdav) path(key string) string {
+	return "/" + key
 }
 
 func (w *webdav) Put(key string, in io.Reader) error {
+	p := w.path(key)
+	if strings.HasSuffix(key, dirSuffix) || key == "" && strings.HasSuffix(w.endpoint.Path, dirSuffix) {
+		return w.mkdirs(p)
+	}
 	var buf = bytes.NewBuffer(nil)
 	in = io.TeeReader(in, buf)
 	out, err := w.c.Create(key)
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(out, in)
+	wbuf := bufPool.Get().(*[]byte)
+	defer bufPool.Put(wbuf)
+	_, err = io.CopyBuffer(out, in, *wbuf)
 	if err != nil {
 		return err
 	}
 	err = out.Close()
-	if err != nil && w.isNotExist(err) {
+	if err != nil && w.isNotExist(path.Dir(key)) {
 		if w.mkdirs(path.Dir(key)) == nil {
 			return w.Put(key, bytes.NewReader(buf.Bytes()))
 		}
@@ -121,7 +140,7 @@ func (w *webdav) Put(key string, in io.Reader) error {
 
 func (w *webdav) Delete(key string) error {
 	err := w.c.RemoveAll(key)
-	if err != nil && w.isNotExist(err) {
+	if err != nil && w.isNotExist(key) {
 		err = nil
 	}
 	return err
@@ -140,9 +159,12 @@ func (w *webdav) ListAll(prefix, marker string) (<-chan Object, error) {
 		// If the root is not ends with `/`, we'll list the directory root resides.
 		walkRoot = path.Dir(prefix)
 	}
-	println("listall", prefix, walkRoot)
 	infos, err := w.c.Readdir(walkRoot, true)
 	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			close(listed)
+			return listed, nil
+		}
 		return nil, err
 	}
 	go func() {
@@ -165,6 +187,9 @@ func (w *webdav) ListAll(prefix, marker string) (<-chan Object, error) {
 }
 
 func newWebDAV(endpoint, user, passwd string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("http://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint %s: %s", endpoint, err)

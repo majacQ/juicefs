@@ -19,15 +19,21 @@ ifdef STATIC
 	export CC
 endif
 
-juicefs: Makefile cmd/*.go pkg/*/*.go
-	go build -ldflags="$(LDFLAGS)"  -o juicefs ./cmd
+juicefs: Makefile cmd/*.go pkg/*/*.go go.*
+	go build -ldflags="$(LDFLAGS)"  -o juicefs .
 
 juicefs.lite: Makefile cmd/*.go pkg/*/*.go
-	go build -tags nogateway,nocos,nobos,nohdfs,noibmcos,nobs,nooss,noqingstor,noscs,nosftp,noswift,noupyun,noazure,nogs \
-		-ldflags="$(LDFLAGS)" -o juicefs.lite ./cmd
+	go build -tags nogateway,nowebdav,nocos,nobos,nohdfs,noibmcos,noobs,nooss,noqingstor,noscs,nosftp,noswift,noupyun,noazure,nogs,noufile,nob2,nosqlite,nomysql,nopg,notikv,nobadger,noetcd \
+		-ldflags="$(LDFLAGS)" -o juicefs.lite .
 
 juicefs.ceph: Makefile cmd/*.go pkg/*/*.go
-	go build -tags ceph -ldflags="$(LDFLAGS)"  -o juicefs.ceph ./cmd
+	go build -tags ceph -ldflags="$(LDFLAGS)"  -o juicefs.ceph .
+
+
+# This is the script for compiling the Linux version on the MacOS platform.
+# Please execute the `brew install FiloSottile/musl-cross/musl-cross` command before using it.
+juicefs.linux:
+	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC=x86_64-linux-musl-gcc CGO_LDFLAGS="-static" go build -ldflags="$(LDFLAGS)"  -o juicefs .
 
 /usr/local/include/winfsp:
 	sudo mkdir -p /usr/local/include/winfsp
@@ -35,11 +41,12 @@ juicefs.ceph: Makefile cmd/*.go pkg/*/*.go
 
 juicefs.exe: /usr/local/include/winfsp cmd/*.go pkg/*/*.go
 	GOOS=windows CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
-	     go build -ldflags="$(LDFLAGS)" -buildmode exe -o juicefs.exe ./cmd
+	     go build -ldflags="$(LDFLAGS)" -buildmode exe -o juicefs.exe .
 
 .PHONY: snapshot release test
 snapshot:
 	docker run --rm --privileged \
+		-e REVISIONDATE=$(REVISIONDATE) \
 		-e PRIVATE_KEY=${PRIVATE_KEY} \
 		-v ~/go/pkg/mod:/go/pkg/mod \
 		-v `pwd`:/go/src/github.com/juicedata/juicefs \
@@ -49,6 +56,7 @@ snapshot:
 
 release:
 	docker run --rm --privileged \
+		-e REVISIONDATE=$(REVISIONDATE) \
 		-e PRIVATE_KEY=${PRIVATE_KEY} \
 		--env-file .release-env \
 		-v ~/go/pkg/mod:/go/pkg/mod \
@@ -58,4 +66,5 @@ release:
 		juicedata/golang-cross:latest release --rm-dist
 
 test:
-	go test -v -cover ./pkg/... ./cmd/...
+	go test -v -cover ./pkg/... -coverprofile=cov1.out
+	sudo JFS_GC_SKIPPEDTIME=1 `which go` test -v -cover ./cmd/... -coverprofile=cov2.out -coverpkg=./pkg/...,./cmd/...

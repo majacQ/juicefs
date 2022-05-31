@@ -1,29 +1,32 @@
-<p align="center"><a href="https://github.com/juicedata/juicefs"><img alt="JuiceFS Logo" src="docs/images/juicefs-logo.png" width="50%" /></a></p>
+<p align="center"><a href="https://github.com/juicedata/juicefs"><img alt="JuiceFS Logo" src="docs/en/images/juicefs-logo.png" width="50%" /></a></p>
 <p align="center">
     <a href="https://travis-ci.com/juicedata/juicefs"><img alt="Build Status" src="https://travis-ci.com/juicedata/juicefs.svg?token=jKSPwswpc2ph4uMtwpHa&branch=main" /></a>
-    <a href="https://join.slack.com/t/juicefs/shared_invite/zt-n9h5qdxh-0bJojPaql8cfFgwerDQJgA"><img alt="Join Slack" src="https://badgen.net/badge/Slack/Join%20JuiceFS/0abd59?icon=slack" /></a>
+    <a href="https://join.slack.com/t/juicefs/shared_invite/zt-n9h5qdxh-YD7e0JxWdesSEa9vY_f_DA"><img alt="Join Slack" src="https://badgen.net/badge/Slack/Join%20JuiceFS/0abd59?icon=slack" /></a>
     <a href="https://goreportcard.com/report/github.com/juicedata/juicefs"><img alt="Go Report" src="https://goreportcard.com/badge/github.com/juicedata/juicefs" /></a>
+    <a href="https://juicefs.com/docs/community/introduction/"><img alt="English doc" src="https://img.shields.io/badge/docs-Doc%20Center-brightgreen" /></a>
     <a href="README_CN.md"><img alt="中文手册" src="https://img.shields.io/badge/docs-%E4%B8%AD%E6%96%87%E6%89%8B%E5%86%8C-brightgreen" /></a>
 </p>
 
-**JuiceFS** is a high-performance [POSIX](https://en.wikipedia.org/wiki/POSIX) file system released under GNU Affero General Public License v3.0. It is specially optimized for the cloud-native environment. Using the JuiceFS to store data, the data itself will be persisted in object storage (e.g. Amazon S3), and the metadata corresponding to the data can be persisted in various database engines such as Redis, MySQL, and SQLite according to the needs of the scene.
+**JuiceFS** is a high-performance [POSIX](https://en.wikipedia.org/wiki/POSIX) file system released under Apache License 2.0, particularly designed for the cloud-native environment. The data, stored via JuiceFS, will be persisted in object storage (e.g. Amazon S3), and the corresponding metadata can be persisted in various database engines such as Redis, MySQL, and SQLite based on the scenarios and requirements.
 
-JuiceFS can simply and conveniently connect massive cloud storage directly to big data, machine learning, artificial intelligence, and various application platforms that have been put into production environment, without modifying the code, you can use massive cloud storage as efficiently as using local storage.
+With JuiceFS, massive cloud storage can be directly connected to big data, machine learning, artificial intelligence, and various application platforms in production environments. Without modifying code, the massive cloud storage can be used as efficiently as local storage. 
 
 📺 **Video**: [What is JuiceFS?](https://www.youtube.com/watch?v=8RdZoBG-D6Y)
 
+📖 **Document**: [Quick start guide](https://juicefs.com/docs/community/quick_start_guide)
+
 ## Highlighted Features
 
-1. **Fully POSIX-compatible**: Use like a local file system, seamlessly docking with existing applications, no business intrusion.
-2. **Fully Hadoop-compatible**: JuiceFS [Hadoop Java SDK](docs/en/hadoop_java_sdk.md) is compatible with Hadoop 2.x and Hadoop 3.x. As well as variety of components in Hadoop ecosystem.
-3. **S3-compatible**:  JuiceFS [S3 Gateway](docs/en/s3_gateway.md) provides S3-compatible interface.
-4. **Cloud Native**: JuiceFS provides [Kubernetes CSI driver](docs/en/how_to_use_on_kubernetes.md) to help people who want to use JuiceFS in Kubernetes.
-5. **Sharing**: JuiceFS is a shared file storage that can be read and written by thousands clients.
-6. **Strong Consistency**: The confirmed modification will be immediately visible on all servers mounted with the same file system .
-7. **Outstanding Performance**: The latency can be as low as a few milliseconds and the throughput can be expanded to nearly unlimited. [Test results](docs/en/benchmark.md)
-8. **Data Encryption**: Supports data encryption in transit and at rest, read [the guide](docs/en/encrypt.md) for more information.
+1. **Fully POSIX-compatible**: Use as a local file system, seamlessly docking with existing applications without breaking business workflow.
+2. **Fully Hadoop-compatible**: JuiceFS' [Hadoop Java SDK](docs/en/deployment/hadoop_java_sdk.md) is compatible with Hadoop 2.x and Hadoop 3.x as well as a variety of components in the Hadoop ecosystems.
+3. **S3-compatible**:  JuiceFS' [S3 Gateway](docs/en/deployment/s3_gateway.md) provides an S3-compatible interface.
+4. **Cloud Native**: A [Kubernetes CSI driver](docs/en/deployment/how_to_use_on_kubernetes.md) is provided for easily using JuiceFS in Kubernetes.
+5. **Shareable**: JuiceFS is a shared file storage that can be read and written by thousands of clients.
+6. **Strong Consistency**: The confirmed modification will be immediately visible on all the servers mounted with the same file system.
+7. **Outstanding Performance**: The latency can be as low as a few milliseconds, and the throughput can be expanded nearly unlimitedly (depending on the size of the object storage). [Test results](docs/en/benchmark/benchmark.md)
+8. **Data Encryption**: Supports data encryption in transit and at rest (please refer to [the guide](docs/en/security/encrypt.md) for more information).
 9. **Global File Locks**: JuiceFS supports both BSD locks (flock) and POSIX record locks (fcntl).
-10. **Data Compression**: JuiceFS supports use [LZ4](https://lz4.github.io/lz4) or [Zstandard](https://facebook.github.io/zstd) to compress all your data.
+10. **Data Compression**: JuiceFS supports [LZ4](https://lz4.github.io/lz4) or [Zstandard](https://facebook.github.io/zstd) to compress all your data.
 
 ---
 
@@ -35,59 +38,59 @@ JuiceFS can simply and conveniently connect massive cloud storage directly to bi
 
 JuiceFS consists of three parts:
 
-1. **JuiceFS Client**: Coordinate the implementation of object storage and metadata storage engines, as well as file system interfaces such as POSIX, Hadoop, Kubernetes, and S3 gateway.
-2. **Data Storage**: Store the data itself, support local disk and object storage.
-3. **Metadata Engine**: Metadata corresponding to the stored data, supporting multiple engines such as Redis, MySQL, and SQLite;
+1. **JuiceFS Client**: Coordinates object storage and metadata storage engine as well as implementation of file system interfaces such as POSIX, Hadoop, Kubernetes, and S3 gateway.
+2. **Data Storage**: Stores data, with supports of a variety of data storage media, e.g., local disk, public or private cloud object storage, and HDFS.
+3. **Metadata Engine**: Stores the corresponding metadata that contains information of file name, file size, permission group, creation and modification time and directory structure, etc., with supports of different metadata engines, e.g., Redis, MySQL, SQLite and TiKV.
 
-![JuiceFS Architecture](docs/images/juicefs-arch-new.png)
+![JuiceFS Architecture](docs/en/images/juicefs-arch-new.png)
 
-JuiceFS relies on Redis to store file system metadata. Redis is a fast, open-source, in-memory key-value data store and very suitable for storing the metadata. All the data will store into object storage through JuiceFS client. [Learn more](docs/en/architecture.md)
+JuiceFS can store the metadata of file system on Redis, which is a fast, open-source, in-memory key-value data storage, particularly suitable for storing metadata; meanwhile, all the data will be stored in object storage through JuiceFS client. [Learn more](docs/en/introduction/architecture.md)
 
-![JuiceFS Storage Format](docs/images/juicefs-storage-format-new.png)
+![JuiceFS Storage Format](docs/en/images/juicefs-storage-format-new.png)
 
-Any file stored in JuiceFS will be split into fixed-size **"Chunk"**, and the default upper limit is 64 MiB. Each Chunk is composed of one or more **"Slice"**. The length of the slice is not fixed, depending on the way the file is written. Each slice will be further split into fixed-size **"Block"**, which is 4 MiB by default. Finally, these blocks will be stored in the object storage. At the same time, JuiceFS will store each file and its Chunks, Slices, Blocks and other metadata information in metadata engines. [Learn more](docs/en/how_juicefs_store_files.md)
+Each file stored in JuiceFS is split into **"Chunk"** s at a fixed size with the default upper limit of 64 MiB. Each Chunk is composed of one or more **"Slice"**(s), and the length of the slice varies depending on how the file is written. Each slice is composed of size-fixed **"Block"** s, which are 4 MiB by default. These blocks will be stored in object storage in the end; at the same time, the metadata information of the file and its Chunks, Slices, and Blocks will be stored in metadata engines via JuiceFS. [Learn more](docs/en/reference/how_juicefs_store_files.md)
 
-![How JuiceFS stores your files](docs/images/how-juicefs-stores-files-new.png)
+![How JuiceFS stores your files](docs/en/images/how-juicefs-stores-files-new.png)
 
-Using JuiceFS, files will eventually be split into Chunks, Slices and Blocks and stored in object storage. Therefore, you will find that the source files stored in JuiceFS cannot be found in the file browser of the object storage platform. There is a chunks directory and a bunch of digitally numbered directories and files in the bucket. Don't panic, this is the secret of the high-performance operation of the JuiceFS!
+When using JuiceFS, files will eventually be split into Chunks, Slices and Blocks and stored in object storage. Therefore, the source files stored in JuiceFS cannot be found in the file browser of the object storage platform; instead, there are only a chunks directory and a bunch of digitally numbered directories and files in the bucket. Don't panic! This is just the secret of the high-performance operation of JuiceFS!
 
 ## Getting Started
 
-To create a JuiceFS, you need the following 3 preparations:
+Before you begin, make sure you have:
 
 1. Redis database for metadata storage
-2. Object storage is used to store data blocks
-3. JuiceFS Client
+2. Object storage for storing data blocks
+3. [JuiceFS Client](https://juicefs.com/docs/community/installation) downloaded and installed
 
-Please refer to [Quick Start Guide](docs/en/quick_start_guide.md) to start using JuiceFS immediately!
+Please refer to [Quick Start Guide](https://juicefs.com/docs/community/quick_start_guide) in the community doc (or doc in [this repo](docs/en/getting-started/for_local.md)) to start using JuiceFS right away!
 
 ### Command Reference
 
-There is a [command reference](docs/en/command_reference.md) to see all options of the subcommand.
+Check out all the command line options in [command reference](docs/en/reference/command_reference.md).
 
 ### Kubernetes
 
-[Using JuiceFS on Kubernetes](docs/en/how_to_use_on_kubernetes.md) is so easy, have a try.
+It is also very easy to use JuiceFS on Kubernetes. Please find more information [here](docs/en/deployment/how_to_use_on_kubernetes.md).
 
 ### Hadoop Java SDK
 
-If you wanna use JuiceFS in Hadoop, check [Hadoop Java SDK](docs/en/hadoop_java_sdk.md).
+If you wanna use JuiceFS in Hadoop, check [Hadoop Java SDK](docs/en/deployment/hadoop_java_sdk.md).
 
 ## Advanced Topics
 
-- [Redis Best Practices](docs/en/redis_best_practices.md)
-- [How to Setup Object Storage](docs/en/how_to_setup_object_storage.md)
-- [Cache Management](docs/en/cache_management.md)
-- [Fault Diagnosis and Analysis](docs/en/fault_diagnosis_and_analysis.md)
-- [FUSE Mount Options](docs/en/fuse_mount_options.md)
+- [Redis Best Practices](docs/en/administration/metadata/redis_best_practices.md)
+- [How to Setup Object Storage](docs/en/reference/how_to_setup_object_storage.md)
+- [Cache Management](docs/en/administration/cache_management.md)
+- [Fault Diagnosis and Analysis](docs/en/administration/fault_diagnosis_and_analysis.md)
+- [FUSE Mount Options](docs/en/reference/fuse_mount_options.md)
 - [Using JuiceFS on Windows](docs/en/juicefs_on_windows.md)
-- [S3 Gateway](docs/en/s3_gateway.md)
+- [S3 Gateway](docs/en/deployment/s3_gateway.md)
 
 Please refer to [JuiceFS User Manual](docs/en/README.md) for more information.
 
 ## POSIX Compatibility
 
-JuiceFS passed all of the 8813 tests in latest [pjdfstest](https://github.com/pjd/pjdfstest).
+JuiceFS has passed all of the compatibility tests (8813 in total) in the latest [pjdfstest](https://github.com/pjd/pjdfstest) .
 
 ```
 All tests successful.
@@ -100,12 +103,12 @@ Files=235, Tests=8813, 233 wallclock secs ( 2.77 usr  0.38 sys +  2.57 cusr  3.9
 Result: PASS
 ```
 
-Besides the things covered by pjdfstest, JuiceFS provides:
+Aside from the POSIX features covered by pjdfstest, JuiceFS also provides:
 
-- Close-to-open consistency. Once a file is closed, the following open and read are guaranteed see the data written before close. Within same mount point, read can see all data written before it immediately.
-- Rename and all other metadata operations are atomic guaranteed by Redis transaction.
-- Open files remain accessible after unlink from same mount point.
-- Mmap is supported (tested with FSx).
+- Close-to-open consistency. Once a file is written and closed, it is guaranteed to view the written data in the following open and read. Within the same mount point, all the written data can be read immediately.
+- Rename and all other metadata operations are atomic, which are guaranteed by Redis transaction.
+- Opened files remain accessible after unlink from same mount point.
+- Mmap (tested with FSx).
 - Fallocate with punch hole support.
 - Extended attributes (xattr).
 - BSD locks (flock).
@@ -115,42 +118,29 @@ Besides the things covered by pjdfstest, JuiceFS provides:
 
 ### Basic benchmark
 
-JuiceFS provides a subcommand to run a few basic benchmarks to understand how it works in your environment:
+JuiceFS provides a subcommand that can run a few basic benchmarks to help you understand how it works in your environment:
 
-```bash
-$ ./juicefs bench /jfs
-Written a big file (1024.00 MiB): (113.67 MiB/s)
-Read a big file (1024.00 MiB): (127.12 MiB/s)
-Written 100 small files (102.40 KiB): 151.7 files/s, 6.6 ms for each file
-Read 100 small files (102.40 KiB): 692.1 files/s, 1.4 ms for each file
-Stated 100 files: 584.2 files/s, 1.7 ms for each file
-FUSE operation: 19333, avg: 0.3 ms
-Update meta: 436, avg: 1.4 ms
-Put object: 356, avg: 4.8 ms
-Get object first byte: 308, avg: 0.2 ms
-Delete object: 356, avg: 0.2 ms
-Used: 23.4s, CPU: 69.1%, MEM: 147.0 MiB
-```
+![JuiceFS Bench](docs/en/images/juicefs-bench.png)
 
 ### Throughput
 
-Performed a sequential read/write benchmark on JuiceFS, [EFS](https://aws.amazon.com/efs) and [S3FS](https://github.com/s3fs-fuse/s3fs-fuse) by [fio](https://github.com/axboe/fio), here is the result:
+A sequential read/write benchmark has also been performed on JuiceFS, [EFS](https://aws.amazon.com/efs) and [S3FS](https://github.com/s3fs-fuse/s3fs-fuse) by [fio](https://github.com/axboe/fio). 
 
-![Sequential Read Write Benchmark](docs/images/sequential-read-write-benchmark.svg)
+![Sequential Read Write Benchmark](docs/en/images/sequential-read-write-benchmark.svg)
 
-It shows JuiceFS can provide 10X more throughput than the other two, read [more details](docs/en/fio.md).
+Above result figure shows that JuiceFS can provide 10X more throughput than the other two (see [more details](docs/en/benchmark/fio.md)).
 
 ### Metadata IOPS
 
-Performed a simple mdtest benchmark on JuiceFS, [EFS](https://aws.amazon.com/efs) and [S3FS](https://github.com/s3fs-fuse/s3fs-fuse) by [mdtest](https://github.com/hpc/ior), here is the result:
+A simple mdtest benchmark has been performed on JuiceFS, [EFS](https://aws.amazon.com/efs) and [S3FS](https://github.com/s3fs-fuse/s3fs-fuse) by [mdtest](https://github.com/hpc/ior).
 
-![Metadata Benchmark](docs/images/metadata-benchmark.svg)
+![Metadata Benchmark](docs/en/images/metadata-benchmark.svg)
 
-It shows JuiceFS can provide significantly more metadata IOPS than the other two, read [more details](docs/en/mdtest.md).
+The result shows that JuiceFS can provide significantly more metadata IOPS than the other two (see [more details](docs/en/benchmark/mdtest.md)).
 
 ### Analyze performance
 
-There is a virtual file called `.accesslog` in the root of JuiceFS to show all the operations and the time they takes, for example:
+There is a virtual file called `.accesslog` in the root of JuiceFS to show all the details of file system operations and the time they take, for example:
 
 ```bash
 $ cat /jfs/.accesslog
@@ -159,7 +149,7 @@ $ cat /jfs/.accesslog
 2021.01.15 08:26:11.003616 [uid:0,gid:0,pid:4403] write (17666,390,951582): OK <0.000006>
 ```
 
-The last number on each line is the time (in seconds) current operation takes. You can use this directly to debug and analyze performance issues, or try `./juicefs profile /jfs` to monitor real time statistics. Please run `./juicefs profile -h` or refer to [here](docs/en/operations_profiling.md) to learn more about this subcommand.
+The last number on each line is the time (in seconds) that the current operation takes. You can directly use this to debug and analyze performance issues, or try `./juicefs profile /jfs` to monitor real time statistics. Please run `./juicefs profile -h` or refer to [here](docs/en/benchmark/operations_profiling.md) to learn more about this subcommand.
 
 ## Supported Object Storage
 
@@ -174,22 +164,26 @@ The last number on each line is the time (in seconds) current operation takes. Y
 - Local disk
 - Redis
 
-JuiceFS supports almost all object storage services. [Learn more](docs/en/how_to_setup_object_storage.md#supported-object-storage).
+JuiceFS supports almost all object storage services. [Learn more](docs/en/reference/how_to_setup_object_storage.md#supported-object-storage).
 
 ## Who is using
 
-It's considered as beta quality, the storage format is not stabilized yet. If you want to use it in a production environment, please do a careful and serious evaluation first. If you are interested in it, please test it as soon as possible and give us [feedback](https://github.com/juicedata/juicefs/discussions).
+JuiceFS is still in beta quality, and the core storage format is not stabilized yet. Thus, please do a careful and thorough evaluation before using JuiceFS in a production environment. If you are interested, feel free to do tests and give us [feedback](https://github.com/juicedata/juicefs/discussions).
 
-You are welcome to tell us after using JuiceFS and share your experience with everyone. We have also collected a summary list in [ADOPTERS.md](ADOPTERS.md), which also includes other open source projects used with JuiceFS.
+You are also welcome to share your experience of using JuiceFS with us and others. Additionally, we have collected a summary list in [ADOPTERS.md](ADOPTERS.md), which includes other open source projects used with JuiceFS.
 
 ## Roadmap
 
 - Stabilize storage format
-- Support FoundationDB as meta engine
+- Support FoundationDB as metadata engine
+- User and group quotas 
+- Directory quotas
+- Snapshot
+- Write once read many (WORM)
 
 ## Reporting Issues
 
-We use [GitHub Issues](https://github.com/juicedata/juicefs/issues) to track community reported issues. You can also [contact](#community) the community for getting answers.
+We use [GitHub Issues](https://github.com/juicedata/juicefs/issues) to track community reported issues. You can also [contact](#community) the community for any questions.
 
 ## Contributing
 
@@ -197,13 +191,13 @@ Thank you for your contribution! Please refer to the [CONTRIBUTING.md](CONTRIBUT
 
 ## Community
 
-Welcome to join the [Discussions](https://github.com/juicedata/juicefs/discussions) and the [Slack channel](https://join.slack.com/t/juicefs/shared_invite/zt-n9h5qdxh-0bJojPaql8cfFgwerDQJgA) to connect with JuiceFS team members and other users.
+Welcome to join the [Discussions](https://github.com/juicedata/juicefs/discussions) and the [Slack channel](https://join.slack.com/t/juicefs/shared_invite/zt-n9h5qdxh-YD7e0JxWdesSEa9vY_f_DA) to connect with JuiceFS team members and other users.
 
 ## Usage Tracking
 
-JuiceFS by default collects **anonymous** usage data. It only collects core metrics (e.g. version number), no user or any sensitive data will be collected. You could review related code [here](pkg/usage/usage.go).
+JuiceFS collects **anonymous** usage data by default to help us better understand how the community is using JuiceFS. Only core metrics (e.g. version number) will be reported, and user data and any other sensitive data will not be included. The related code can be viwed [here](pkg/usage/usage.go). 
 
-These data help us understand how the community is using this project. You could disable reporting easily by command line option `--no-usage-report`:
+You could also disable reporting easily by command line option `--no-usage-report`:
 
 ```bash
 $ ./juicefs mount --no-usage-report
@@ -211,26 +205,32 @@ $ ./juicefs mount --no-usage-report
 
 ## License
 
-JuiceFS is open-sourced under GNU AGPL v3.0, see [LICENSE](LICENSE).
+JuiceFS is open-sourced under Apache License 2.0, see [LICENSE](LICENSE).
 
 ## Credits
 
-The design of JuiceFS was inspired by [Google File System](https://research.google/pubs/pub51), [HDFS](https://hadoop.apache.org) and [MooseFS](https://moosefs.com), thanks to their great work.
+The design of JuiceFS was inspired by [Google File System](https://research.google/pubs/pub51), [HDFS](https://hadoop.apache.org) and [MooseFS](https://moosefs.com). Thanks for their great work!
 
 ## FAQ
 
 ### Why doesn't JuiceFS support XXX object storage?
 
-JuiceFS already supported many object storage, please check [the list](docs/en/how_to_setup_object_storage.md#supported-object-storage) first. If this object storage is compatible with S3, you could treat it as S3. Otherwise, try reporting issue.
+JuiceFS supports many object storage. Please check out [this list](docs/en/reference/how_to_setup_object_storage.md#supported-object-storage) first. If the object storage you want to use is compatible with S3, you could treat it as S3. Otherwise, try reporting issue.
 
 ### Can I use Redis cluster?
 
-The simple answer is no. JuiceFS uses [transaction](https://redis.io/topics/transactions) to guarantee the atomicity of metadata operations, which is not well supported in cluster mode. Sentinal or other HA solution for Redis are needed.
+The simple answer is no. JuiceFS uses [Redis transaction](https://redis.io/topics/transactions) to guarantee the atomicity of metadata operations, which is not well supported by cluster mode. For this, sentinal or other Redis HA solution are needed.
 
-See ["Redis Best Practices"](docs/en/redis_best_practices.md) for more information.
+See ["Redis Best Practices"](docs/en/administration/metadata/redis_best_practices.md) for more information.
 
 ### What's the difference between JuiceFS and XXX?
 
-See ["Comparison with Others"](docs/en/comparison_with_others.md) for more information.
+See ["Comparison with Others"](docs/en/comparison) for more information.
 
 For more FAQs, please see the [full list](docs/en/faq.md).
+
+
+
+## Stargazers over time
+
+[![Stargazers over time](https://starchart.cc/juicedata/juicefs.svg)](https://starchart.cc/juicedata/juicefs)

@@ -1,18 +1,20 @@
+//go:build !noqiniu && !nos3
 // +build !noqiniu,!nos3
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -30,14 +32,14 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/qiniu/api.v7/v7/auth/qbox"
-	"github.com/qiniu/api.v7/v7/storage"
+	"github.com/qiniu/go-sdk/v7/auth"
+	"github.com/qiniu/go-sdk/v7/storage"
 )
 
 type qiniu struct {
 	s3client
 	bm     *storage.BucketManager
-	mac    *qbox.Mac
+	cred   *auth.Credentials
 	cfg    *storage.Config
 	marker string
 }
@@ -48,7 +50,7 @@ func (q *qiniu) String() string {
 
 func (q *qiniu) download(key string, off, limit int64) (io.ReadCloser, error) {
 	deadline := time.Now().Add(time.Second * 3600).Unix()
-	url := storage.MakePrivateURL(q.mac, os.Getenv("QINIU_DOMAIN"), key, deadline)
+	url := storage.MakePrivateURL(q.cred, os.Getenv("QINIU_DOMAIN"), key, deadline)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -72,9 +74,14 @@ func (q *qiniu) download(key string, off, limit int64) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
+var notexist = "no such file or directory"
+
 func (q *qiniu) Head(key string) (Object, error) {
 	r, err := q.bm.Stat(q.bucket, key)
 	if err != nil {
+		if strings.Contains(err.Error(), notexist) {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 
@@ -105,7 +112,7 @@ func (q *qiniu) Put(key string, in io.Reader) error {
 		return err
 	}
 	putPolicy := storage.PutPolicy{Scope: q.bucket + ":" + key}
-	upToken := putPolicy.UploadToken(q.mac)
+	upToken := putPolicy.UploadToken(q.cred)
 	formUploader := storage.NewFormUploader(q.cfg)
 	var ret storage.PutRet
 	return formUploader.Put(ctx, &ret, upToken, key, body, vlen, nil)
@@ -120,7 +127,11 @@ func (q *qiniu) CreateMultipartUpload(key string) (*MultipartUpload, error) {
 }
 
 func (q *qiniu) Delete(key string) error {
-	return q.bm.Delete(q.bucket, key)
+	err := q.bm.Delete(q.bucket, key)
+	if err != nil && strings.Contains(err.Error(), notexist) {
+		return nil
+	}
+	return err
 }
 
 func (q *qiniu) List(prefix, marker string, limit int64) ([]Object, error) {
@@ -155,15 +166,10 @@ func (q *qiniu) List(prefix, marker string, limit int64) ([]Object, error) {
 	return objs, nil
 }
 
-var publicRegions = map[string]*storage.Zone{
-	"cn-east-1":      &storage.ZoneHuadong,
-	"cn-north-1":     &storage.ZoneHuabei,
-	"cn-south-1":     &storage.ZoneHuanan,
-	"us-west-1":      &storage.ZoneBeimei,
-	"ap-southeast-1": &storage.ZoneXinjiapo,
-}
-
 func newQiniu(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint: %v, error: %v", endpoint, err)
@@ -200,8 +206,8 @@ func newQiniu(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 	cfg := storage.Config{
 		UseHTTPS: uri.Scheme == "https",
 	}
-	zone, ok := publicRegions[region]
-	if !ok {
+	zone, err := storage.GetZone(accessKey, bucket)
+	if err != nil {
 		domain := strings.SplitN(endpoint, "-", 2)[1]
 		zone = &storage.Zone{
 			RsHost:     "rs-" + domain,
@@ -216,9 +222,9 @@ func newQiniu(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		zone.SrcUpHosts = []string{"free-qvm-z0-xs.qiniup.com"}
 	}
 	cfg.Zone = zone
-	mac := qbox.NewMac(accessKey, secretKey)
-	bucketManager := storage.NewBucketManager(mac, &cfg)
-	return &qiniu{s3client, bucketManager, mac, &cfg, ""}, nil
+	cred := auth.New(accessKey, secretKey)
+	bucketManager := storage.NewBucketManager(cred, &cfg)
+	return &qiniu{s3client, bucketManager, cred, &cfg, ""}, nil
 }
 
 func init() {

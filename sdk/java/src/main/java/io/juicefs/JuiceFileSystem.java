@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package io.juicefs;
 
@@ -19,11 +20,10 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.*;
+import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.util.Progressable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.xeustechnologies.jcl.JarClassLoader;
-import org.xeustechnologies.jcl.JclObjectFactory;
-import org.xeustechnologies.jcl.JclUtils;
 
 import java.io.IOException;
 import java.net.URI;
@@ -38,7 +38,6 @@ import java.util.concurrent.TimeUnit;
 @InterfaceStability.Stable
 public class JuiceFileSystem extends FilterFileSystem {
   private static final Logger LOG = LoggerFactory.getLogger(JuiceFileSystem.class);
-  private static JarClassLoader jcl;
 
   private static boolean fileChecksumEnabled = false;
   private static boolean distcpPatched = false;
@@ -46,10 +45,6 @@ public class JuiceFileSystem extends FilterFileSystem {
   private ScheduledExecutorService emptier;
 
   static {
-    jcl = new JarClassLoader();
-    String path = JuiceFileSystem.class.getProtectionDomain().getCodeSource().getLocation().getPath();
-    jcl.add(path); // Load jar file
-
     PatchUtil.patchBefore("org.apache.flink.runtime.fs.hdfs.HadoopRecoverableFsDataOutputStream",
             "waitUntilLeaseIsRevoked",
             new String[]{"org.apache.hadoop.fs.FileSystem", "org.apache.hadoop.fs.Path"},
@@ -66,13 +61,6 @@ public class JuiceFileSystem extends FilterFileSystem {
             null,
             "if (sourceFS.getFileStatus(source).getBlockSize() != targetFS.getFileStatus(target).getBlockSize()) {return ;}");
     distcpPatched = true;
-  }
-
-  private static FileSystem createInstance() {
-    // Create default factory
-    JclObjectFactory factory = JclObjectFactory.getInstance();
-    Object obj = factory.create(jcl, "io.juicefs.JuiceFileSystemImpl");
-    return (FileSystem) JclUtils.deepClone(obj);
   }
 
   @Override
@@ -105,7 +93,7 @@ public class JuiceFileSystem extends FilterFileSystem {
   }
 
   public JuiceFileSystem() {
-    super(createInstance());
+    super(new JuiceFileSystemImpl());
   }
 
   @Override
@@ -116,6 +104,14 @@ public class JuiceFileSystem extends FilterFileSystem {
       return "hdfs";
     }
     return fs.getScheme();
+  }
+
+  public FSDataOutputStream create(Path f, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress) throws IOException {
+    return fs.create(f, FsPermission.getFileDefault(), overwrite, bufferSize, replication, blockSize, progress);
+  }
+
+  public FSDataOutputStream createNonRecursive(Path f, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress) throws IOException {
+    return fs.createNonRecursive(f, FsPermission.getFileDefault(), overwrite, bufferSize, replication, blockSize, progress);
   }
 
   @Override

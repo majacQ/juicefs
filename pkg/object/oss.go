@@ -1,18 +1,20 @@
+//go:build !nooss
 // +build !nooss
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -68,6 +70,9 @@ func (o *ossClient) checkError(err error) error {
 func (o *ossClient) Head(key string) (Object, error) {
 	r, err := o.bucket.GetObjectMeta(key)
 	if o.checkError(err) != nil {
+		if e, ok := err.(oss.ServiceError); ok && e.StatusCode == http.StatusNotFound {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 
@@ -313,7 +318,7 @@ func autoOSSEndpoint(bucketName, accessKey, secretKey, securityToken string) (st
 	// try oss internal endpoint
 	if conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s-internal.aliyuncs.com:http",
 		bucketLocation), time.Second*3); err == nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Sprintf("http://%s-internal.aliyuncs.com", bucketLocation), nil
 	}
 
@@ -321,6 +326,9 @@ func autoOSSEndpoint(bucketName, accessKey, secretKey, securityToken string) (st
 }
 
 func newOSS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint: %v, error: %v", endpoint, err)
@@ -375,6 +383,7 @@ func newOSS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 	client.Config.HTTPTimeout.HeaderTimeout = time.Second * 5    // 60s
 	client.Config.HTTPTimeout.LongTimeout = time.Second * 30     // 300s
 	client.Config.IsEnableCRC = false                            // CRC64ECMA is much slower than CRC32C
+	client.Config.UserAgent = UserAgent
 
 	bucket, err := client.Bucket(bucketName)
 	if err != nil {

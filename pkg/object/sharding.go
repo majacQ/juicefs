@@ -1,22 +1,24 @@
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
 
 import (
 	"container/heap"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -71,12 +73,14 @@ const maxResults = 10000
 func ListAll(store ObjectStorage, prefix, marker string) (<-chan Object, error) {
 	if ch, err := store.ListAll(prefix, marker); err == nil {
 		return ch, nil
+	} else if !errors.Is(err, notSupported) {
+		return nil, err
 	}
 
 	startTime := time.Now()
 	out := make(chan Object, maxResults)
 	logger.Debugf("Listing objects from %s marker %q", store, marker)
-	objs, err := store.List("", marker, maxResults)
+	objs, err := store.List(prefix, marker, maxResults)
 	if err != nil {
 		logger.Errorf("Can't list %s: %s", store, err.Error())
 		return nil, err
@@ -90,7 +94,9 @@ func ListAll(store ObjectStorage, prefix, marker string) (<-chan Object, error) 
 			for _, obj := range objs {
 				key := obj.Key()
 				if !first && key <= lastkey {
-					logger.Fatalf("The keys are out of order: marker %q, last %q current %q", marker, lastkey, key)
+					logger.Errorf("The keys are out of order: marker %q, last %q current %q", marker, lastkey, key)
+					out <- nil
+					return
 				}
 				lastkey = key
 				// logger.Debugf("found key: %s", key)

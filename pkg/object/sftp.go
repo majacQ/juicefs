@@ -1,3 +1,4 @@
+//go:build !nosftp
 // +build !nosftp
 
 // Part of this file is borrowed from Rclone under MIT license:
@@ -12,16 +13,20 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/term"
 )
 
 // conn encapsulates an ssh client and corresponding sftp client
@@ -145,7 +150,7 @@ func (f *sftpStore) putSftpConnection(pc **conn, err error) {
 }
 
 func (f *sftpStore) String() string {
-	return fmt.Sprintf("%s@%s:%s/", f.config.User, f.host, f.root)
+	return fmt.Sprintf("%s@%s:%s", f.config.User, f.host, f.root)
 }
 
 // always preserve suffix `/` for directory key
@@ -153,16 +158,7 @@ func (f *sftpStore) path(key string) string {
 	if key == "" {
 		return f.root
 	}
-	var absPath string
-	if strings.HasSuffix(key, dirSuffix) {
-		absPath = filepath.Join(f.root, key) + dirSuffix
-	} else {
-		absPath = filepath.Join(f.root, key)
-	}
-	if runtime.GOOS == "windows" {
-		absPath = strings.Replace(absPath, "\\", "/", -1)
-	}
-	return absPath
+	return f.root + key
 }
 
 func (f *sftpStore) Head(key string) (Object, error) {
@@ -201,7 +197,7 @@ func (f *sftpStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
 
 	if off > 0 {
 		if _, err := ff.Seek(off, 0); err != nil {
-			ff.Close()
+			_ = ff.Close()
 			return nil, err
 		}
 	}
@@ -244,7 +240,7 @@ func (f *sftpStore) Put(key string, in io.Reader) error {
 	defer bufPool.Put(buf)
 	_, err = io.CopyBuffer(ff, in, *buf)
 	if err != nil {
-		ff.Close()
+		_ = ff.Close()
 		return err
 	}
 	err = ff.Close()
@@ -318,9 +314,10 @@ func fileInfo(key string, fi os.FileInfo) Object {
 		owner,
 		group,
 		fi.Mode(),
+		!fi.Mode().IsDir() && !fi.Mode().IsRegular(),
 	}
 	if fi.IsDir() {
-		if key != "" {
+		if key != "" && !strings.HasSuffix(key, "/") {
 			f.key += "/"
 		}
 		f.size = 0
@@ -356,7 +353,7 @@ func (f *sftpStore) find(c *sftp.Client, path, marker string, out chan Object) {
 			return
 		}
 		if marker == "" {
-			out <- fileInfo("", fi)
+			out <- fileInfo(path[len(f.root):], fi)
 		}
 		f.doFind(c, path, marker, out)
 	} else {
@@ -380,11 +377,14 @@ func (f *sftpStore) find(c *sftp.Client, path, marker string, out chan Object) {
 			}
 
 			key := p[len(f.root):]
-			if key > marker || marker == "" {
-				out <- fileInfo(key, fi)
-			}
-			if fi.IsDir() && (key > marker || strings.HasPrefix(marker, key)) {
-				f.doFind(c, p+dirSuffix, marker, out)
+			prefix := path[len(f.root):]
+			if strings.HasPrefix(key, prefix) {
+				if key > marker || marker == "" {
+					out <- fileInfo(key, fi)
+				}
+				if fi.IsDir() && (key > marker || strings.HasPrefix(marker, key)) {
+					f.doFind(c, p+dirSuffix, marker, out)
+				}
 			}
 		}
 	}
@@ -409,7 +409,29 @@ func (f *sftpStore) ListAll(prefix, marker string) (<-chan Object, error) {
 	return listed, nil
 }
 
-func newSftp(endpoint, user, pass string) (ObjectStorage, error) {
+func SshInteractive(user, instruction string, questions []string, echos []bool) (answers []string, err error) {
+	if len(questions) == 0 {
+		fmt.Print(user, instruction)
+	} else {
+		answers = make([]string, len(questions))
+		for i, q := range questions {
+			fmt.Print(q)
+			var ans []byte
+			if echos[i] {
+				_, err = fmt.Scanln(&answers[i])
+			} else {
+				ans, err = term.ReadPassword(int(syscall.Stdin))
+				answers[i] = string(ans)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("read password: %s", err)
+			}
+		}
+	}
+	return answers, nil
+}
+
+func newSftp(endpoint, username, pass string) (ObjectStorage, error) {
 	idx := strings.LastIndex(endpoint, ":")
 	host, port, err := net.SplitHostPort(endpoint[:idx])
 	if err != nil && strings.Contains(err.Error(), "missing port") {
@@ -423,19 +445,21 @@ func newSftp(endpoint, user, pass string) (ObjectStorage, error) {
 		root = strings.Replace(root, "\\", "/", -1)
 	}
 	// append suffix `/` removed by filepath.Clean()
-	// `.` is a directory, add `/`
-	if strings.HasSuffix(endpoint[idx+1:], dirSuffix) || root == "." {
+	if strings.HasSuffix(endpoint[idx+1:], dirSuffix) {
 		root = root + dirSuffix
 	}
 
-	config := &ssh.ClientConfig{
-		User:            user,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         time.Second * 3,
+	if username == "" {
+		u, _ := user.Current()
+		if u != nil {
+			username = u.Username
+		}
 	}
-
+	var auth []ssh.AuthMethod
 	if pass != "" {
-		config.Auth = append(config.Auth, ssh.Password(pass))
+		auth = append(auth, ssh.Password(pass))
+	} else {
+		auth = append(auth, ssh.KeyboardInteractive(SshInteractive))
 	}
 
 	if privateKeyPath := os.Getenv("SSH_PRIVATE_KEY_PATH"); privateKeyPath != "" {
@@ -443,15 +467,47 @@ func newSftp(endpoint, user, pass string) (ObjectStorage, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unable to read private key, error: %v", err)
 		}
-
 		signer, err := ssh.ParsePrivateKey(key)
 		if err != nil {
 			return nil, fmt.Errorf("unable to parse private key, error: %v", err)
 		}
-
-		config.Auth = append(config.Auth, ssh.PublicKeys(signer))
+		auth = append(auth, ssh.PublicKeys(signer))
+	} else {
+		home := filepath.Join(os.Getenv("HOME"), ".ssh")
+		var algo = []string{"rsa", "dsa", "ecdsa", "ecdsa_sk", "ed25519", "xmss"}
+		for _, a := range algo {
+			key, err := ioutil.ReadFile(filepath.Join(home, "id_"+a))
+			if err != nil {
+				key, err = ioutil.ReadFile(filepath.Join(home, "id_"+a+"-cert"))
+			}
+			if err == nil {
+				signer, err := ssh.ParsePrivateKey(key)
+				if err == nil {
+					auth = append(auth, ssh.PublicKeys(signer))
+				} else {
+					logger.Debugf("load private key %s: %s", filepath.Join(home, "id_"+a), err)
+				}
+			}
+		}
 	}
 
+	socket := os.Getenv("SSH_AUTH_SOCK")
+	if socket != "" {
+		conn, err := net.Dial("unix", socket)
+		if err != nil {
+			logger.Errorf("Failed to open SSH_AUTH_SOCK: %v", err)
+		} else {
+			agent := agent.NewClient(conn)
+			auth = append(auth, ssh.PublicKeysCallback(agent.Signers))
+		}
+	}
+
+	config := &ssh.ClientConfig{
+		User:            username,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         time.Second * 3,
+		Auth:            auth,
+	}
 	f := &sftpStore{
 		host:   host,
 		port:   port,
@@ -460,8 +516,19 @@ func newSftp(endpoint, user, pass string) (ObjectStorage, error) {
 	}
 
 	c, err := f.getSftpConnection()
+	if err != nil && strings.Contains(err.Error(), "unable to authenticate") &&
+		pass == "" && os.Getenv("SSH_PRIVATE_KEY_PATH") == "" {
+		fmt.Printf("%s@%s's password: ", username, host)
+		var password []byte
+		password, err = term.ReadPassword(int(syscall.Stdin))
+		if err != nil {
+			return nil, fmt.Errorf("Read password: %s", err.Error())
+		}
+		f.config.Auth = append(f.config.Auth, ssh.Password(string(password)))
+		c, err = f.getSftpConnection()
+	}
 	if err != nil {
-		logger.Errorf("getSftpConnection failed: %s", err)
+		logger.Errorf("connect to %s failed: %s", host, err)
 		return nil, err
 	}
 	defer f.putSftpConnection(&c, err)

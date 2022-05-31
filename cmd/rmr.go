@@ -1,19 +1,20 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
 	"fmt"
@@ -24,38 +25,49 @@ import (
 
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/utils"
-	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
 )
 
-func rmrFlags() *cli.Command {
+func cmdRmr() *cli.Command {
 	return &cli.Command{
 		Name:      "rmr",
-		Usage:     "remove directories recursively",
-		ArgsUsage: "PATH ...",
 		Action:    rmr,
+		Category:  "TOOL",
+		Usage:     "Remove directories recursively",
+		ArgsUsage: "PATH ...",
+		Description: `
+This command provides a faster way to remove huge directories in JuiceFS.
+
+Examples:
+$ juicefs rmr /mnt/jfs/foo`,
 	}
 }
 
-func openController(path string) *os.File {
-	f, err := os.OpenFile(filepath.Join(path, ".control"), os.O_RDWR, 0)
-	if err != nil && !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) {
-		logger.Errorf("%s", err)
-		return nil
+func openController(mp string) *os.File {
+	st, err := os.Stat(mp)
+	if err != nil {
+		logger.Fatal(err)
 	}
-	if err != nil && path != "/" {
-		return openController(filepath.Dir(path))
+	if !st.IsDir() {
+		mp = filepath.Dir(mp)
 	}
-	return f
+	for ; mp != "/"; mp = filepath.Dir(mp) {
+		f, err := os.OpenFile(filepath.Join(mp, ".control"), os.O_RDWR, 0)
+		if err == nil {
+			return f
+		}
+		if !os.IsNotExist(err) {
+			logger.Fatal(err)
+		}
+	}
+	logger.Fatalf("Path %s is not inside JuiceFS", mp)
+	panic("unreachable")
 }
 
 func rmr(ctx *cli.Context) error {
+	setup(ctx, 1)
 	if runtime.GOOS == "windows" {
 		logger.Infof("Windows is not supported")
-		return nil
-	}
-	if ctx.Args().Len() < 1 {
-		logger.Infof("PATH is needed")
 		return nil
 	}
 	for i := 0; i < ctx.Args().Len(); i++ {
@@ -87,10 +99,7 @@ func rmr(ctx *cli.Context) error {
 			logger.Fatalf("write message: %s", err)
 		}
 		var errs = make([]byte, 1)
-		n, err := f.Read(errs)
-		if err != nil || n != 1 {
-			logger.Fatalf("read message: %d %s", n, err)
-		}
+		_ = readControl(f, errs)
 		if errs[0] != 0 {
 			errno := syscall.Errno(errs[0])
 			if runtime.GOOS == "windows" {
