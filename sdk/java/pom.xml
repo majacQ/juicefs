@@ -8,7 +8,11 @@
 	<version>0.17-dev</version>
 	<packaging>jar</packaging>
 	<properties>
+  <<<<<<< snyk-fix-af6bb8653fbf3dff5896a9215c51d9da
 		<hadoop.version>3.3.0</hadoop.version>
+  =======
+		<hadoop.version>3.3.3</hadoop.version>
+  >>>>>>> main
 	</properties>
 	<build>
 		<plugins>
